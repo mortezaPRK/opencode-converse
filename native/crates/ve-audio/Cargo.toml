@@ -1,0 +1,15 @@
+[package]
+name = "ve-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+
+# Audio device I/O; no audio device is opened by the model-free runtime tests.
+cpal = "0.18.2"
+# Lock-free SPSC ring between the audio thread and the workers.
+rtrb = "0.4.0"
+# Streaming, stateful sample-rate conversion (cpal does not resample).
+rubato = "5.0.1"
