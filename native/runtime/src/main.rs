@@ -515,3 +515,476 @@ fn main() {
     std::process::exit(code);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_only_storage_requires_effective_compiled_debug_assertions() {
+        assert!(fixture_allowed(true));
+        assert!(!fixture_allowed(false));
+    }
+    #[test]
+    fn oversized_serialized_output_is_rejected_before_any_bytes_are_written() {
+        let message = Engine::Prompt {
+            turn: 1,
+            text: "\u{1}".repeat(protocol::MAX_TEXT_BYTES),
+        };
+        let mut output = vec![];
+        assert!(write_message(&mut output, &message).is_err());
+        assert!(output.is_empty());
+        let message = Engine::Prompt {
+            turn: 1,
+            text: "quotes \\\" ".repeat(10_000),
+        };
+        write_message(&mut output, &message).unwrap();
+        assert!(output.len() <= MAX_FRAME_BYTES && output.ends_with(b"\n"));
+    }
+    #[test]
+    fn failed_worker_detail_is_found_behind_a_bounded_event_burst() {
+        let (tx, rx) = mpsc::sync_channel(MAX_EVENTS);
+        for _ in 1..MAX_EVENTS {
+            tx.send(Input::Ready).unwrap();
+        }
+        tx.send(Input::Failure(
+            "native_error",
+            "Models missing; run models install".into(),
+        ))
+        .unwrap();
+        assert_eq!(
+            queued_failure(&rx),
+            Some(("native_error", "Models missing; run models install".into()))
+        );
+        assert!(queued_failure(&rx).is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn engine_lock_survives_the_run_scope_until_os_process_teardown() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("engine.lock");
+        let file = std::fs::File::create(&path).unwrap();
+        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        let fd = file.as_raw_fd();
+        {
+            let _guard = retain_process_lock(file);
+        }
+        let second = std::fs::File::open(&path).unwrap();
+        let retained = fs2::FileExt::try_lock_exclusive(&second).is_err();
+        if retained {
+            // SAFETY: the process-scoped helper retains this owned descriptor;
+            // only this test reclaims it, rather than leaking it until test exit.
+            drop(unsafe { std::fs::File::from_raw_fd(fd) });
+        }
+        assert!(
+            retained,
+            "returning from run released the audio engine lock"
+        );
+    }
+    #[test]
+    fn fixture_trace_records_only_allowed_consumed_jobs_once() {
+        for enabled in [false, true] {
+            let mut fixture = FixtureSink {
+                trace: enabled,
+                ..Default::default()
+            };
+            let mut traces = vec![];
+            fixture.action(Action::Cancel, 1).unwrap();
+            fixture
+                .action(Action::Speak("Canceled chunk.".into()), 1)
+                .unwrap();
+            fixture.action(Action::Cancel, 2).unwrap();
+            fixture
+                .action(Action::Speak("Allowed \"chunk\".".into()), 2)
+                .unwrap();
+            fixture.action(Action::Finish, 2).unwrap();
+            assert_eq!(
+                fixture.tick_with(|text| traces.push(fixture_trace(text))),
+                Some(2)
+            );
+            assert_eq!(
+                fixture.tick_with(|text| traces.push(fixture_trace(text))),
+                None
+            );
+            assert_eq!(fixture.played, ["Allowed \"chunk\"."]);
+            if enabled {
+                assert_eq!(traces.len(), 1);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&traces[0]).unwrap(),
+                    serde_json::json!({"fixture": "played", "text": "Allowed \"chunk\"."})
+                );
+            } else {
+                assert!(traces.is_empty());
+            }
+            fixture
+                .action(Action::Speak("Capture-fenced chunk.".into()), 2)
+                .unwrap();
+            fixture.fence.invalidate(1);
+            assert!(fixture
+                .tick_with(|text| traces.push(fixture_trace(text)))
+                .is_none());
+            assert_eq!(traces.len(), usize::from(enabled));
+        }
+    }
+    #[test]
+    fn fixture_retries_completion_after_full_event_queue() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut backend = Backend::new();
+        backend.action(Action::Cancel, &tx).unwrap();
+        backend.action(Action::Finish, &tx).unwrap();
+        tx.try_send(Input::Ready).unwrap();
+        backend.tick(&tx);
+        assert!(matches!(rx.recv().unwrap(), Input::Ready));
+        backend.tick(&tx);
+        assert!(matches!(rx.try_recv(), Ok(Input::Drained(1))));
+    }
+    #[test]
+    fn bounded_framing() {
+        assert!(frame(&mut &b"{}"[..]).is_err());
+        assert_eq!(frame(&mut &b"{}\n"[..]).unwrap().unwrap(), b"{}\n");
+        assert!(frame(&mut vec![b' '; MAX_FRAME_BYTES + 1].as_slice()).is_err());
+    }
+
+    // A real queued recording fixture, not an assertion on protocol status alone.
+    // It uses the same generation fence as the native pre-playback commit.
+    struct SpeechFixture {
+        controller: Controller,
+        backend: Backend,
+        tx: SyncSender<Input>,
+        out: Vec<Engine>,
+    }
+    impl SpeechFixture {
+        fn new() -> Self {
+            let (tx, _) = mpsc::sync_channel(64);
+            let mut s = Self {
+                controller: Controller::default(),
+                backend: Backend::new(),
+                tx,
+                out: vec![],
+            };
+            s.controller.ready(&mut s.out, &mut vec![]);
+            s
+        }
+        fn apply(&mut self, actions: Vec<Action>) {
+            for action in actions {
+                self.backend.action(action, &self.tx).unwrap();
+            }
+        }
+        fn host(&mut self, message: Host) {
+            let mut actions = vec![];
+            self.controller
+                .host(message, &mut self.out, &mut actions)
+                .unwrap();
+            self.apply(actions);
+        }
+        fn user(&mut self, id: u64) {
+            let mut actions = vec![];
+            self.controller.hearing(id, &mut self.out, &mut actions);
+            self.apply(actions);
+        }
+        fn tick(&mut self) {
+            if let Some(epoch) = self.backend.fixture.tick() {
+                if epoch == self.backend.epoch && self.backend.can_drain(epoch) {
+                    let mut actions = vec![];
+                    self.controller.drained(&mut self.out, &mut actions);
+                    self.apply(actions);
+                }
+            }
+        }
+        fn announcement(&mut self, id: &str, text: &str) {
+            self.host(Host::Announcement {
+                reply: id.into(),
+                text: text.into(),
+            });
+        }
+    }
+    #[test]
+    fn announcement_fixture_schedules_sanitized_audio_only_after_idle() {
+        let mut f = SpeechFixture::new();
+        f.user(1);
+        f.controller
+            .transcript(1, "user request".into(), &mut vec![], &mut vec![]);
+        f.announcement("a", "Worker **finished** safely.\n```\nsecret();\n```\n");
+        f.tick();
+        assert!(f.backend.fixture.played.is_empty());
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Completed,
+        });
+        f.tick();
+        assert!(f.backend.fixture.played.is_empty()); // drain schedules; does not yet play
+        f.tick();
+        assert_eq!(f.backend.fixture.played, ["Worker finished safely."]);
+        f.announcement("a", "Do not repeat.");
+        f.tick();
+        assert_eq!(f.backend.fixture.played.len(), 1);
+    }
+    #[test]
+    fn clipped_replacement_preserves_one_played_notice_and_the_turn_budget() {
+        for replacements in [1, 3] {
+            let mut f = SpeechFixture::new();
+            f.user(1);
+            f.controller
+                .transcript(1, "user request".into(), &mut vec![], &mut vec![]);
+            f.host(Host::ReplyDelta {
+                turn: 1,
+                reply: "large".into(),
+                text: "A b c. ".repeat(70),
+            });
+            // No playback tick: cancellation must replace the old queued notice.
+            for i in 0..replacements {
+                f.host(Host::ReplyDelta {
+                    turn: 1,
+                    reply: format!("replacement-{i}"),
+                    text: "New answer stays on screen. ".into(),
+                });
+            }
+            let reply = format!("replacement-{}", replacements - 1);
+            f.host(Host::ReplyDelta {
+                turn: 1,
+                reply: reply.clone(),
+                text: "More answer stays on screen. ".into(),
+            });
+            f.host(Host::ReplyEnd {
+                turn: 1,
+                reply,
+                text: "New answer stays on screen. More answer stays on screen. ".into(),
+            });
+            f.host(Host::TurnEnd {
+                turn: 1,
+                reason: protocol::Reason::Completed,
+            });
+            for _ in 0..5 {
+                f.tick();
+            }
+            assert_eq!(f.backend.fixture.played, ["The rest is on screen."]);
+            assert!(matches!(
+                f.out.last(),
+                Some(Engine::Status {
+                    state: Status::Listening
+                })
+            ));
+        }
+    }
+    #[test]
+    fn fresh_clipping_notice_is_still_canceled_by_mute_or_hearing() {
+        for mute in [false, true] {
+            let mut f = SpeechFixture::new();
+            f.user(1);
+            f.controller
+                .transcript(1, "user request".into(), &mut vec![], &mut vec![]);
+            f.host(Host::ReplyDelta {
+                turn: 1,
+                reply: "large".into(),
+                text: "A b c. ".repeat(70),
+            });
+            f.host(Host::ReplyDelta {
+                turn: 1,
+                reply: "replacement".into(),
+                text: "New answer stays on screen. ".into(),
+            });
+            assert_eq!(
+                f.backend.fixture.jobs.len(),
+                1,
+                "replacement must queue its clipping cue before interruption"
+            );
+            if mute {
+                f.host(Host::Mute { on: true });
+            } else {
+                f.user(2);
+            }
+            for _ in 0..5 {
+                f.tick();
+            }
+            assert!(f.backend.fixture.played.is_empty());
+        }
+    }
+    #[test]
+    fn abandoned_capture_and_duplicate_terminal_preserve_actual_announcement_playback() {
+        let mut f = SpeechFixture::new();
+        f.user(1);
+        f.announcement("queued", "A queued worker update.");
+        let mut actions = vec![];
+        f.controller
+            .transcript(1, String::new(), &mut vec![], &mut actions);
+        f.apply(actions);
+        f.tick();
+        assert_eq!(f.backend.fixture.played, ["A queued worker update."]);
+
+        f.user(2);
+        f.controller
+            .transcript(2, "user request".into(), &mut vec![], &mut vec![]);
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Failed,
+        });
+        f.announcement("fresh", "An unrelated fresh update.");
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Failed,
+        });
+        f.tick();
+        assert_eq!(
+            f.backend.fixture.played.last().unwrap(),
+            "An unrelated fresh update."
+        );
+    }
+    #[test]
+    fn announcement_fixture_barge_in_discards_inflight_and_pending_without_resume() {
+        let mut f = SpeechFixture::new();
+        f.announcement("a", "First chunk is audible. Second chunk must stop.");
+        f.announcement("b", "Pending announcement must stop.");
+        f.tick();
+        assert_eq!(f.backend.fixture.played, ["First chunk is audible."]);
+        f.user(1);
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert_eq!(f.backend.fixture.played, ["First chunk is audible."]);
+        f.controller
+            .transcript(1, "new user request".into(), &mut vec![], &mut vec![]);
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Completed,
+        });
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert_eq!(f.backend.fixture.played.len(), 1);
+        f.announcement("fresh", "Fresh announcement may play.");
+        f.tick();
+        assert_eq!(
+            f.backend.fixture.played.last().unwrap(),
+            "Fresh announcement may play."
+        );
+    }
+    #[test]
+    fn announcement_fixture_mute_and_disconnect_clear_the_actual_queue() {
+        for message in [
+            Host::Mute { on: true },
+            Host::TurnEnd {
+                turn: 1,
+                reason: protocol::Reason::Disconnected,
+            },
+        ] {
+            let mut f = SpeechFixture::new();
+            f.announcement("a", "Never played after cancellation.");
+            f.announcement("b", "Also pending and canceled.");
+            f.host(message);
+            f.host(Host::Mute { on: false });
+            for _ in 0..5 {
+                f.tick();
+            }
+            assert!(f.backend.fixture.played.is_empty());
+        }
+    }
+
+    #[test]
+    fn drained_hearing_race_never_resumes_a_queued_announcement() {
+        let mut f = SpeechFixture::new();
+        f.announcement("current", "Current announcement starts here.");
+        f.announcement("pending", "Stale pending announcement must not play.");
+        let epoch = f.backend.epoch;
+        // Capture detected activity; Hearing is still behind an older Drained in the bus.
+        f.backend.fixture.fence.invalidate(1);
+        assert!(f.backend.fixture.tick().is_none());
+        assert!(!f.backend.can_drain(epoch));
+        // Even if main checked Drained just before capture invalidated, the actions
+        // it computed must not clear the capture fence or enqueue playable speech.
+        let mut actions = vec![];
+        f.controller.drained(&mut vec![], &mut actions);
+        f.apply(actions);
+        assert!(!f.backend.can_drain(f.backend.epoch));
+        f.tick();
+        assert!(f.backend.fixture.played.is_empty());
+        f.user(1); // Only this acknowledges the pending Hearing fence.
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert!(f.backend.fixture.played.is_empty());
+        f.controller
+            .transcript(1, "fresh user prompt".into(), &mut vec![], &mut vec![]);
+        f.host(Host::ReplyEnd {
+            turn: 1,
+            reply: "fresh".into(),
+            text: "Fresh response may play.".into(),
+        });
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Completed,
+        });
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert_eq!(f.backend.fixture.played, ["Fresh response may play."]);
+    }
+
+    #[test]
+    fn oversized_output_and_reply_counts_are_bounded_without_ending_the_turn() {
+        for (announcement, text) in [
+            (true, "One short sentence. ".repeat(500)),     // >9 KB
+            (false, "One short sentence. ".repeat(20_000)), // >300 KB
+            (true, "A b c. ".repeat(70)),
+        ] {
+            let mut f = SpeechFixture::new();
+            if announcement {
+                f.announcement("large", &text);
+            } else {
+                f.user(1);
+                f.controller
+                    .transcript(1, "user".into(), &mut vec![], &mut vec![]);
+                let message = Host::ReplyEnd {
+                    turn: 1,
+                    reply: "large".into(),
+                    text,
+                };
+                assert!(message.validate().is_ok());
+                f.host(message);
+                f.host(Host::TurnEnd {
+                    turn: 1,
+                    reason: protocol::Reason::Completed,
+                });
+            }
+            for _ in 0..100 {
+                f.tick();
+            }
+            assert!(f.backend.fixture.played.len() <= 49);
+            assert_eq!(
+                f.backend.fixture.played.last().unwrap(),
+                "The rest is on screen."
+            );
+            f.announcement("after", "Conversation remains alive now.");
+            for _ in 0..5 {
+                f.tick();
+            }
+            assert_eq!(
+                f.backend.fixture.played.last().unwrap(),
+                "Conversation remains alive now."
+            );
+        }
+        let mut f = SpeechFixture::new();
+        f.user(1);
+        f.controller
+            .transcript(1, "user".into(), &mut vec![], &mut vec![]);
+        for i in 0..300 {
+            f.host(Host::ReplyEnd {
+                turn: 1,
+                reply: format!("reply-{i}"),
+                text: "A b c.".into(),
+            });
+        }
+        f.host(Host::TurnEnd {
+            turn: 1,
+            reason: protocol::Reason::Completed,
+        });
+        for _ in 0..100 {
+            f.tick();
+        }
+        assert!(f.backend.fixture.played.len() <= 49);
+        f.announcement("after-cap", "Conversation is still running.");
+        f.tick();
+        assert_eq!(
+            f.backend.fixture.played.last().unwrap(),
+            "Conversation is still running."
+        );
+    }
+}
