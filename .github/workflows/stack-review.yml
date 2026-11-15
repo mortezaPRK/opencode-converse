@@ -1,0 +1,96 @@
+name: Review stack (combined tip)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-stack-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  combined-tip:
+    name: combined review-stack tip (not standalone)
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'review/') &&
+      github.event.pull_request.head.ref != 'review/29-docs-ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: review/29-docs-ci
+          fetch-depth: 0
+      - name: Verify current review-stack refs
+        shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/heads/${PR_HEAD_REF}"
+          git check-ref-format "refs/heads/${PR_BASE_REF}"
+          git fetch --no-tags origin \
+            "+refs/heads/${PR_HEAD_REF}:refs/remotes/origin/${PR_HEAD_REF}" \
+            "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}" \
+            "+refs/heads/review/29-docs-ci:refs/remotes/origin/review/29-docs-ci"
+          HEAD_SHA=$(git rev-parse --verify "refs/remotes/origin/${PR_HEAD_REF}^{commit}")
+          BASE_SHA=$(git rev-parse --verify "refs/remotes/origin/${PR_BASE_REF}^{commit}")
+          TIP_SHA=$(git rev-parse --verify 'refs/remotes/origin/review/29-docs-ci^{commit}')
+          BASELINE_SHA=$(git rev-parse --verify 'e404b23ae5b5817fbdcdb4f3c463173eec5f92fe^{commit}')
+          {
+            echo '## Combined review-stack tip (not standalone)'
+            echo
+            echo "Event head: \`${PR_HEAD_SHA}\`"
+            echo "Current remote head: \`${HEAD_SHA}\`"
+            echo "Current remote base: \`${BASE_SHA}\`"
+            echo "Combined tip: \`${TIP_SHA}\`"
+            echo "Baseline: \`${BASELINE_SHA}\`"
+            echo
+            echo 'Validation runs on the combined tip, not the partial PR checkout.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$HEAD_SHA" != "$PR_HEAD_SHA" ]]; then
+            echo '::error::Stale PR event: current remote head differs from the event head.'
+            exit 1
+          fi
+          git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA" || {
+            echo '::error::Current remote PR base is not an ancestor of the PR head.'
+            exit 1
+          }
+          git merge-base --is-ancestor "$HEAD_SHA" "$TIP_SHA" || {
+            echo '::error::PR head is not an ancestor of the combined tip.'
+            exit 1
+          }
+          git merge-base --is-ancestor "$BASELINE_SHA" "$TIP_SHA" || {
+            echo '::error::Expected baseline is not an ancestor of the combined tip.'
+            exit 1
+          }
+          if [[ -n "$(git rev-list --merges "${BASELINE_SHA}..${TIP_SHA}")" ]]; then
+            echo '::error::Review stack contains merge commits after the baseline.'
+            exit 1
+          fi
+          git checkout --detach "$TIP_SHA"
+          echo "::notice title=combined-stack-tip::${TIP_SHA}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm pack --dry-run
+      - run: cargo fmt --manifest-path native/Cargo.toml --all --check
+      - run: cargo test --manifest-path native/Cargo.toml -p opencode-converse --locked
+      - run: cargo clippy --manifest-path native/Cargo.toml -p opencode-converse --locked -- -D warnings
+      - run: npm run test:integration
