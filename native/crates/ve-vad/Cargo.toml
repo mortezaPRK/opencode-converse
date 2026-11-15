@@ -1,0 +1,17 @@
+[package]
+name = "ve-vad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Silero ONNX voice activity detection"
+
+[dependencies]
+anyhow.workspace = true
+# Keep API 17: changing ORT's API/optimization behavior can change model numerics.
+# Binary downloads require an explicit TLS feature. Compiler-rt is linked by build.rs.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+  "std",
+  "api-17",
+  "download-binaries",
+  "tls-native",
+] }

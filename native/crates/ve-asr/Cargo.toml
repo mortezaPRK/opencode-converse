@@ -1,0 +1,17 @@
+[package]
+name = "ve-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "English Whisper speech recognition for OpenCode Converse"
+
+[dependencies]
+anyhow.workspace = true
+
+# macOS explicitly enables Metal; other platforms use CPU Whisper.
+# whisper-rs has no default GPU feature.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "=0.16.0", features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = "=0.16.0"
