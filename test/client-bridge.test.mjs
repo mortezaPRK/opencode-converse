@@ -807,6 +807,295 @@ test("delivery winning queued cancellation is interrupted before submitting the 
   await s.bridge.stop();
 });
 
+test("completed interrupted executions never interrupt a newer worker during prompt replay or inbox cancellation", async () => {
+  for (const race of ["prompt", "cancel-success", "cancel-conflict"]) {
+    let accept;
+    let settleCancel;
+    const s = setup({
+      ...(race === "prompt"
+        ? {
+            prompt: () =>
+              new Promise((resolve) => {
+                accept = resolve;
+              }),
+          }
+        : {}),
+      cancel: () =>
+        new Promise((resolve, reject) => {
+          settleCancel = () =>
+            race === "cancel-conflict" ? reject(new Error("delivered")) : resolve();
+        }),
+    });
+    await s.bridge.start();
+    s.engine({ type: "prompt", turn: 1, text: "first" });
+    await tick();
+    s.engine({ type: "interrupt", turn: 1 });
+    await tick();
+    s.emit("session.execution.started", {});
+    s.emit("session.inbox.delivered", { inboxID: "inbox-1" });
+    s.emit("session.execution.interrupted", {});
+    background(s, "new-worker");
+    await tick();
+    if (race === "prompt") accept({ id: "inbox-1" });
+    else settleCancel();
+    await tick();
+    assert.equal(s.calls.filter(([type]) => type === "interrupt").length, 0);
+    assert.deepEqual(s.errors, []);
+    s.emit("session.text.ended", {
+      assistantMessageID: "new-worker",
+      ordinal: 0,
+      text: "still running",
+    });
+    await tick();
+    assert.deepEqual(s.frames.at(-1), {
+      type: "announcement",
+      reply: "new-worker:0",
+      text: "still running",
+    });
+    await s.bridge.stop();
+  }
+});
+
+test("genuine inbox cancellation failure cannot release a replacement prompt", async () => {
+  const s = setup({
+    cancel: async () => {
+      throw new Error("transport failed");
+    },
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "first" });
+  await tick();
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "replacement" });
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  assert.equal(s.bridge.snapshot().status, "off");
+  assert.match(s.errors[0].message, /transport failed/);
+  await s.bridge.stop();
+});
+
+test("unconfirmed prompt admission fails closed even after Rust cancels before the inbox response", async () => {
+  for (const cancelled of [true, false])
+    for (const failure of [
+      new Error("HTTP response timed out after admission"),
+      new DOMException("response aborted", "AbortError"),
+      { _tag: "ServiceUnavailableError", message: "server returned 503 after uncertain admission" },
+    ]) {
+      let reject;
+      const s = setup({
+        prompt: () =>
+          new Promise((_, fail) => {
+            reject = fail;
+          }),
+      });
+      await s.bridge.start();
+      s.engine({ type: "prompt", turn: 1, text: "possibly accepted" });
+      await tick();
+      if (cancelled) {
+        s.engine({ type: "interrupt", turn: 1 });
+        s.engine({ type: "prompt", turn: 2, text: "must not submit" });
+      }
+      reject(failure);
+      await tick();
+      assert.equal(s.bridge.snapshot().status, "off");
+      assert.match(s.errors[0].message, /unconfirmed.*admission|admission.*unconfirmed/i);
+      assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+      assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+      await s.bridge.stop();
+    }
+});
+
+test("explicit pre-admission request rejection does not manufacture an uncertain accepted turn", async () => {
+  for (const _tag of [
+    "InvalidRequestError",
+    "ConflictError",
+    "UnauthorizedError",
+    "ForbiddenError",
+    "SessionNotFoundError",
+    "LocationNotFoundError",
+    "ModelNotFoundError",
+    "AgentNotFoundError",
+  ]) {
+    let reject;
+    let count = 0;
+    const s = setup({
+      prompt: () =>
+        ++count === 1
+          ? new Promise((_, fail) => {
+              reject = fail;
+            })
+          : { id: "second" },
+    });
+    await s.bridge.start();
+    s.engine({ type: "prompt", turn: 1, text: "invalid request" });
+    await tick();
+    s.engine({ type: "interrupt", turn: 1 });
+    s.engine({ type: "prompt", turn: 2, text: "valid replacement" });
+    reject({
+      _tag,
+      message: "Definitively rejected prompt request",
+      sessionID: "session",
+      providerID: "fixture",
+      modelID: "model",
+      agentID: "agent",
+      directory: "/chosen",
+    });
+    await tick();
+    assert.deepEqual(s.errors, []);
+    assert.equal(count, 2);
+    await s.bridge.stop();
+  }
+});
+
+test("UTF-8 clipping only normalizes and encodes the retained source prefix", (t) => {
+  const giant = "😀".repeat(2_000_000);
+  const originalFrom = Buffer.from;
+  const originalReplace = String.prototype.replace;
+  let fullInputProcessed = false;
+  const from = t.mock.method(Buffer, "from", function (input, ...args) {
+    if (typeof input === "string" && input.length > 10) fullInputProcessed = true;
+    return originalFrom.call(Buffer, input, ...args);
+  });
+  const replace = t.mock.method(String.prototype, "replace", function (...args) {
+    if (this.length > 10) fullInputProcessed = true;
+    return originalReplace.apply(this, args);
+  });
+  const result = clipUtf8(giant, 8);
+  from.mock.restore();
+  replace.mock.restore();
+  assert.equal(result, "😀😀");
+  assert.equal(fullInputProcessed, false, "discarded input must not be normalized or buffered");
+});
+
+test("bounded clipping preserves replacement, control, euro and emoji byte semantics", () => {
+  for (const text of ["\ud800X", "X\udc00", "😀€X", "\u0000\t\r\n€😀", "\ud800\ud800\udc00"]) {
+    for (let limit = 0; limit <= 14; limit++) {
+      const clean = text.replace(/\p{Cc}/gu, (char) =>
+        char.charCodeAt(0) >= 32 || char === "\n" || char === "\t" ? char : " ",
+      );
+      const bytes = Buffer.from(clean);
+      let end = Math.min(limit, bytes.length);
+      while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+      assert.equal(clipUtf8(text, limit), bytes.subarray(0, end).toString("utf8"));
+    }
+  }
+});
+
+test("delivery conflict before SSE waits for confirmation without cancelling newer work", async () => {
+  for (const alreadyTerminal of [false, true]) {
+    const s = setup({
+      cancel: async () => {
+        throw { _tag: "InvalidRequestError", message: "Inbox item already delivered" };
+      },
+    });
+    await s.bridge.start();
+    s.engine({ type: "prompt", turn: 1, text: "first" });
+    await tick();
+    s.engine({ type: "interrupt", turn: 1 });
+    s.engine({ type: "prompt", turn: 2, text: "replacement" });
+    await tick();
+    assert.deepEqual(s.errors, []);
+    assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+    s.emit("session.execution.started", {});
+    s.emit("session.inbox.delivered", { inboxID: "inbox-1" });
+    if (alreadyTerminal) {
+      s.emit("session.execution.interrupted", {});
+      background(s, "new-worker");
+    }
+    await tick();
+    assert.equal(s.calls.filter(([type]) => type === "interrupt").length, alreadyTerminal ? 0 : 1);
+    if (!alreadyTerminal) {
+      assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+      s.emit("session.execution.interrupted", {});
+      await tick();
+    }
+    assert.equal(s.calls.filter(([type]) => type === "prompt").length, 2);
+    assert.deepEqual(s.errors, []);
+    await s.bridge.stop();
+  }
+});
+
+test("delivery conflict without SSE confirmation times out closed", async (t) => {
+  const s = setup({
+    cancel: async () => {
+      throw { _tag: "InvalidRequestError", message: "Inbox item already delivered" };
+    },
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "first" });
+  await tick();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "replacement" });
+  await tick();
+  assert.deepEqual(s.errors, []);
+  t.mock.timers.tick(10_000);
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  assert.equal(s.bridge.snapshot().status, "off");
+  assert.match(s.errors[0].message, /delivery confirmation timed out/);
+  await s.bridge.stop();
+});
+
+test("interrupt acknowledgement without terminal confirmation times out closed", async (t) => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "replacement" });
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  t.mock.timers.tick(10_000);
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  assert.equal(s.bridge.snapshot().status, "off");
+  assert.match(s.errors[0].message, /completion timed out/);
+  await s.bridge.stop();
+});
+
+test("long text overtaking the prompt response is bounded without losing lifecycle correlation", async () => {
+  for (const deltas of [false, true]) {
+    let accept;
+    const s = setup({
+      prompt: () =>
+        new Promise((resolve) => {
+          accept = resolve;
+        }),
+    });
+    await s.bridge.start();
+    s.engine({ type: "prompt", turn: 1, text: "first" });
+    await tick();
+    s.emit("session.execution.started", {});
+    s.emit("session.inbox.delivered", { inboxID: "ours" });
+    s.emit("session.step.started", { assistantMessageID: "ours" });
+    if (deltas)
+      for (let i = 0; i < 6000; i++) {
+        s.emit("session.text.delta", {
+          assistantMessageID: "ours",
+          ordinal: 0,
+          delta: "😀".repeat(100),
+        });
+      }
+    s.emit("session.text.ended", {
+      assistantMessageID: "ours",
+      ordinal: 0,
+      text: "😀".repeat(400_000),
+    });
+    s.emit("session.execution.succeeded", {});
+    await tick();
+    assert.deepEqual(s.errors, []);
+    accept({ id: "ours" });
+    await tick();
+    const end = s.frames.find((frame) => frame.type === "reply_end");
+    assert.equal(Buffer.byteLength(end.text), 262_144);
+    assert.equal(end.text.includes("�"), false);
+    assert.deepEqual(s.frames.at(-1), { type: "turn_end", turn: 1, reason: "completed" });
+    assert.deepEqual(s.errors, []);
+    await s.bridge.stop();
+  }
+});
+
 test("forty thousand deltas and thousands of completed steps keep running without stale replay", async () => {
   const s = setup();
   await s.bridge.start();
@@ -946,6 +1235,298 @@ test("movement and literal alias-location events close immediately, even before 
     }
 });
 
+test("native stop rejection still attempts original-location server cleanup and remains a replacement barrier", async () => {
+  for (const serverFails of [false, true]) {
+    const nativeError = new Error("native termination unconfirmed");
+    const s = setup({
+      runtime: () => ({
+        ready: Promise.resolve(),
+        send() {},
+        stop: async () => {
+          throw nativeError;
+        },
+      }),
+      stop: async () => {
+        if (serverFails) throw new Error("original-location cleanup denied");
+      },
+    });
+    await s.bridge.start();
+    const stopping = s.bridge.stop();
+    assert.equal(s.bridge.stop(), stopping);
+    await assert.rejects(stopping, (error) => error === nativeError);
+    assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+    assert.equal(s.errors.length, serverFails ? 1 : 0);
+    assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, {
+      directory: "/chosen",
+    });
+    assert.equal(s.bridge.snapshot().status, "off");
+    s.engine({ type: "prompt", turn: 1, text: "must stay closed" });
+    await tick();
+    assert.equal(s.calls.filter(([type]) => type === "prompt").length, 0);
+  }
+});
+
+test("confirmed native stop resolves and reports refused server cleanup without changing location", async () => {
+  const s = setup({
+    stop: async () => {
+      throw new Error("original-location cleanup denied");
+    },
+  });
+  await s.bridge.start();
+  await s.bridge.stop();
+  assert.equal(s.errors.length, 1);
+  assert.match(s.errors[0].message, /cleanup denied/);
+  assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, { directory: "/chosen" });
+  assert.equal(s.stopped(), 1);
+});
+
+test("server cleanup allows its ten-second drain plus fixed network grace", async (t) => {
+  const s = setup({
+    stop: async (_input, options) =>
+      new Promise((resolve, reject) => {
+        setTimeout(resolve, 10_000);
+        options.signal.addEventListener("abort", () => reject(new Error("cleanup deadline")), {
+          once: true,
+        });
+      }),
+  });
+  await s.bridge.start();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const budgets = [];
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    budgets.push(milliseconds);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), milliseconds);
+    return controller.signal;
+  });
+  const stopping = s.bridge.stop();
+  await tick();
+  t.mock.timers.tick(10_000);
+  await stopping;
+  assert.deepEqual(s.errors, []);
+  assert.deepEqual(budgets, [15_000]);
+  assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, { directory: "/chosen" });
+});
+
+test("stop publishes its pending promise before off notification and retries native confirmation only", async () => {
+  let confirmed = false;
+  let observed = false;
+  let reentrant;
+  const nativeError = new Error("native termination unconfirmed");
+  const s = setup({
+    runtime: () => ({
+      ready: Promise.resolve(),
+      send() {},
+      stop: async () => {
+        if (!confirmed) throw nativeError;
+      },
+    }),
+    onChange(snapshot) {
+      if (snapshot.status === "off" && !observed) {
+        observed = true;
+        reentrant = s.bridge.stop();
+        void reentrant.catch(() => {});
+      }
+    },
+  });
+  await s.bridge.start();
+  const stopping = s.bridge.stop();
+  void stopping.catch(() => {});
+  assert.equal(reentrant, stopping);
+  await assert.rejects(stopping, (error) => error === nativeError);
+  const offCount = s.snapshots.filter((snapshot) => snapshot.status === "off").length;
+  await assert.rejects(s.bridge.stop(), (error) => error === nativeError);
+  confirmed = true;
+  await s.bridge.stop();
+  assert.equal(s.snapshots.filter((snapshot) => snapshot.status === "off").length, offCount);
+});
+
+test("terminal-frame synchronous runtime failure cannot reenter an active turn or strand cleanup", async () => {
+  for (const terminal of ["stop", "completion"]) {
+    let options;
+    let stops = 0;
+    let terminalFrames = 0;
+    const s = setup({
+      runtime: (value) => {
+        options = value;
+        return {
+          ready: Promise.resolve(),
+          send(frame) {
+            if (frame.type === "turn_end") {
+              terminalFrames++;
+              if (terminalFrames === 1) options.onError(new Error("outgoing queue overflow"));
+            }
+          },
+          stop: async () => {
+            stops++;
+          },
+        };
+      },
+    });
+    await s.bridge.start();
+    await begin(s);
+    if (terminal === "completion") {
+      s.emit("session.execution.succeeded", {});
+      await tick();
+    }
+    const stopping = s.bridge.stop();
+    let timer;
+    try {
+      await Promise.race([
+        stopping,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("cleanup remained unsettled")), 100);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(terminalFrames, 1);
+    assert.equal(stops, 1);
+    assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+    assert.equal(s.bridge.snapshot().status, "off");
+  }
+});
+
+test("synchronous terminal send exception still closes and settles the published cleanup barrier", async () => {
+  let stops = 0;
+  const s = setup({
+    runtime: () => ({
+      ready: Promise.resolve(),
+      send(frame) {
+        if (frame.type === "turn_end") throw new Error("send threw");
+      },
+      stop: async () => {
+        stops++;
+      },
+    }),
+  });
+  await s.bridge.start();
+  await begin(s);
+  assert.throws(() => s.bridge.stop(), /send threw/);
+  await s.bridge.stop();
+  assert.equal(stops, 1);
+  assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+  assert.equal(s.bridge.snapshot().status, "off");
+});
+
+test("buffered and live deltas remain a prefix after an omitted buffered delta", async () => {
+  let accept;
+  const s = setup({
+    prompt: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "first" });
+  await tick();
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "ours" });
+  s.emit("session.step.started", { assistantMessageID: "ours" });
+  s.emit("session.text.delta", { assistantMessageID: "ours", ordinal: 0, delta: "prefix" });
+  s.emit("session.text.delta", {
+    assistantMessageID: "ours",
+    ordinal: 0,
+    delta: "a".repeat(400_000),
+  });
+  s.emit("session.text.delta", { assistantMessageID: "ours", ordinal: 0, delta: "buffered-gap" });
+  await tick();
+  accept({ id: "ours" });
+  await tick();
+  s.emit("session.text.delta", { assistantMessageID: "ours", ordinal: 0, delta: "live-gap" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "ours",
+    ordinal: 0,
+    text: "prefix" + "a".repeat(400_000) + "buffered-gaplive-gap",
+  });
+  await tick();
+  assert.equal(
+    s.frames
+      .filter((frame) => frame.type === "reply_delta")
+      .map((frame) => frame.text)
+      .join(""),
+    "prefix",
+  );
+  assert.equal(
+    s.frames.find((frame) => frame.type === "reply_end").text,
+    "prefix" + "a".repeat(262_144 - 6),
+  );
+  await s.bridge.stop();
+});
+
+test("buffer eviction preserves full completion without replaying a retained suffix", async () => {
+  let accept;
+  const s = setup({
+    prompt: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "first" });
+  await tick();
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "ours" });
+  s.emit("session.step.started", { assistantMessageID: "ours" });
+  s.emit("session.text.delta", { assistantMessageID: "ours", ordinal: 0, delta: "old-prefix" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "noise",
+    ordinal: 0,
+    text: "\\".repeat(262_144),
+  });
+  s.emit("session.text.delta", {
+    assistantMessageID: "ours",
+    ordinal: 0,
+    delta: "buffered-suffix",
+  });
+  await tick();
+  accept({ id: "ours" });
+  await tick();
+  s.emit("session.text.delta", { assistantMessageID: "ours", ordinal: 0, delta: "live-suffix" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "ours",
+    ordinal: 0,
+    text: "old-prefixbuffered-suffixlive-suffix",
+  });
+  await tick();
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.frames.filter((frame) => frame.type === "reply_delta").length, 0);
+  assert.equal(
+    s.frames.find((frame) => frame.type === "reply_end").text,
+    "old-prefixbuffered-suffixlive-suffix",
+  );
+  await s.bridge.stop();
+});
+
+test("a multibyte delta that cannot fit closes the prefix before a later ASCII delta", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  s.emit("session.text.delta", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    delta: "a".repeat(262_143),
+  });
+  s.emit("session.text.delta", { assistantMessageID: "assistant-1", ordinal: 0, delta: "😀" });
+  s.emit("session.text.delta", { assistantMessageID: "assistant-1", ordinal: 0, delta: "X" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    text: "a".repeat(262_143) + "😀X",
+  });
+  await tick();
+  assert.ok(
+    s.frames
+      .filter((frame) => frame.type === "reply_delta")
+      .map((frame) => frame.text)
+      .join("") === "a".repeat(262_143),
+    "stream must retain the exact prefix without the later X",
+  );
+  assert.ok(s.frames.find((frame) => frame.type === "reply_end").text === "a".repeat(262_143));
+  await s.bridge.stop();
+});
+
 test("failed prompt preserves buffered fresh worker announcements", async () => {
   let reject;
   const s = setup({
@@ -1048,4 +1629,343 @@ test("buffered background delivery keeps its receipt generation across hearing o
     );
     await s.bridge.stop();
   }
+});
+
+test("duplicate consumed background delivery cannot erase newer user step ownership", async () => {
+  const s = setup();
+  await s.bridge.start();
+  background(s, "worker");
+  s.emit("session.execution.succeeded", {});
+  await tick();
+  await begin(s);
+  enqueue(s, "worker");
+  s.emit("session.inbox.delivered", { inboxID: "worker" });
+  s.emit("session.step.started", { assistantMessageID: "next-user-step" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "next-user-step",
+    ordinal: 0,
+    text: "answer",
+  });
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "reply_end", turn: 1, reply: "next-user-step:0", text: "answer" },
+  ]);
+  await s.bridge.stop();
+});
+
+test(
+  "real Rust fixture speaks a live idle worker summary once through the client transport",
+  { timeout: 180_000 },
+  async (t) => {
+    const root = fileURLToPath(new URL("../", import.meta.url));
+    const executable = buildFixture(root);
+    const base = join(tmpdir(), "opencode");
+    await mkdir(base, { recursive: true });
+    const dir = await mkdtemp(join(base, "converse-client-"));
+    let proc;
+    let closed;
+    let trace;
+    let transport;
+    const s = setup({
+      runtime: (options) =>
+        (transport = startRuntime({
+          ...options,
+          spawn: () => {
+            proc = spawn(executable, ["run", "--test-fixture"], {
+              cwd: root,
+              env: fixtureEnvironment(dir),
+              stdio: "pipe",
+            });
+            trace = fixtureTrace(proc, s.errors);
+            closed = new Promise((resolve) =>
+              proc.once("close", (code, signal) => resolve({ code, signal })),
+            );
+            return proc;
+          },
+        })),
+    });
+    t.after(async () => {
+      try {
+        await s.bridge.stop();
+      } finally {
+        try {
+          if (proc?.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        } finally {
+          await removeAfterClose(dir, { child: proc, closed });
+        }
+      }
+    });
+    const wait = async (predicate) => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate()) {
+        assert.equal(s.errors.length, 0, s.errors[0]?.message);
+        assert.ok(
+          Date.now() < deadline,
+          JSON.stringify({
+            snapshots: s.snapshots,
+            frames: s.frames.map((frame) => ({
+              ...frame,
+              text: frame.text ? `${Buffer.byteLength(frame.text)} bytes` : undefined,
+            })),
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    await s.bridge.start();
+    await wait(() => s.calls.some(([type]) => type === "prompt"));
+    s.emit("session.execution.started", {});
+    s.emit("session.inbox.delivered", { inboxID: "inbox-1" });
+    s.emit("session.step.started", { assistantMessageID: "user" });
+    s.emit("session.text.ended", {
+      assistantMessageID: "user",
+      ordinal: 0,
+      text: "Your worker is running. " + "A short sentence. ".repeat(20_000),
+    });
+    s.emit("session.execution.succeeded", {});
+    await wait(
+      () =>
+        s.snapshots.some((state) => state.status === "speaking") &&
+        s.bridge.snapshot().status === "listening",
+    );
+    const drain = async (reply, text) => {
+      const baseline = s.snapshots.length;
+      transport.send({ type: "announcement", reply, text });
+      await wait(() => {
+        const states = s.snapshots.slice(baseline);
+        const speaking = states.findIndex((snapshot) => snapshot.status === "speaking");
+        return (
+          trace.played.includes(text) &&
+          speaking >= 0 &&
+          states.slice(speaking + 1).some((snapshot) => snapshot.status === "listening")
+        );
+      });
+    };
+    await drain("initial-fixture-drain:0", "Initial fixture drain barrier.");
+    const playedBaseline = trace.played.length;
+    const before = s.snapshots.filter((state) => state.status === "speaking").length;
+    background(s, "worker");
+    s.emit("session.text.ended", {
+      assistantMessageID: "worker",
+      ordinal: 0,
+      text: "Your worker has completed. " + "€".repeat(3100),
+    });
+    s.emit("session.text.ended", {
+      assistantMessageID: "worker",
+      ordinal: 0,
+      text: "Your worker has completed. " + "€".repeat(3100),
+    });
+    s.emit("session.execution.succeeded", {});
+    await wait(
+      () =>
+        s.snapshots.filter((state) => state.status === "speaking").length > before &&
+        s.bridge.snapshot().status === "listening",
+    );
+    assert.equal(s.snapshots.filter((state) => state.status === "speaking").length, before + 1);
+    assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+    // Replayed delivery uses a fresh assistant so identity dedupe cannot hide a
+    // bridge replay. A consumed FIFO sentinel fences this without cancellation.
+    background(s, "worker");
+    s.emit("session.step.started", { assistantMessageID: "replayed-worker" });
+    s.emit("session.text.ended", {
+      assistantMessageID: "replayed-worker",
+      ordinal: 0,
+      text: "Your worker has completed. " + "€".repeat(3100),
+    });
+    s.emit("session.execution.succeeded", {});
+    await tick();
+    const sentinel = "Worker fixture drain barrier.";
+    await drain("worker-fixture-drain:0", sentinel);
+    // The Rust speech consumer has a 320-byte UTF-8-safe chunk bound. Pin the
+    // complete retained summary sequence, not just its scheduling status.
+    const euros = Math.floor((8192 - Buffer.byteLength("Your worker has completed. ")) / 3);
+    const expectedSummary = [
+      "Your worker has completed.",
+      ...Array(Math.floor(euros / 106)).fill("€".repeat(106)),
+      "€".repeat(euros % 106),
+      "The rest is on screen.",
+    ];
+    assert.deepEqual(trace.played.slice(playedBaseline), [...expectedSummary, sentinel]);
+    assert.equal(s.frames.filter((frame) => frame.type === "announcement").length, 1);
+    await s.bridge.stop();
+    assert.deepEqual(await closed, { code: 0, signal: null });
+    await trace.closed;
+    assert.deepEqual(trace.played.slice(playedBaseline), [...expectedSummary, sentinel]);
+    assert.equal(s.errors.length, 0);
+  },
+);
+
+test("bridge snapshots authenticated client, location and model; runtime receives no endpoint", async () => {
+  const s = setup();
+  s.target.directory = "/changed";
+  s.target.model.id = "changed";
+  await s.bridge.start();
+  assert.deepEqual(Object.keys(s.runtimeOptions()).sort(), ["onError", "onMessage", "settings"]);
+  assert.deepEqual(s.runtimeOptions().settings, { inputDevice: "mic" });
+  assert.equal(typeof s.runtimeOptions().onError, "function");
+  assert.equal(typeof s.runtimeOptions().onMessage, "function");
+  const call = s.calls.find(([type]) => type === "start");
+  assert.deepEqual(call[1], { model: { providerID: "provider", id: "model", variant: "high" } });
+  assert.deepEqual(call[2].location, { directory: "/chosen" });
+  assert.deepEqual(s.bridge.snapshot(), {
+    serverID: "remote-server",
+    sessionID: "session",
+    status: "loading",
+  });
+  await begin(s);
+  assert.deepEqual(s.calls.find(([type]) => type === "prompt")[1], {
+    sessionID: "session",
+    text: "hello",
+  });
+  await s.bridge.stop();
+  assert.equal(s.stopped(), 1);
+  assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, { directory: "/chosen" });
+});
+
+test("reply correlation ignores reasoning, duplicates, foreign sessions and stale assistants", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  s.emit("session.reasoning.delta", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    delta: "private",
+  });
+  s.emit("session.text.delta", { assistantMessageID: "unknown", ordinal: 0, delta: "stale" });
+  s.emit("session.text.delta", {
+    sessionID: "other",
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    delta: "other",
+  });
+  const event = s.emit("session.text.delta", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    delta: "Hi",
+  });
+  s.emit(event.type, event.data, { id: event.id });
+  s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "Hi there" });
+  s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "Hi there" });
+  s.emit("session.execution.succeeded", {});
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "reply_delta", turn: 1, reply: "assistant-1:0", text: "Hi" },
+    { type: "reply_end", turn: 1, reply: "assistant-1:0", text: "Hi there" },
+    { type: "turn_end", turn: 1, reason: "completed" },
+  ]);
+  const secondTurn = s.frames.length;
+  await begin(s, 2);
+  s.emit("session.text.delta", { assistantMessageID: "assistant-1", ordinal: 0, delta: "old" });
+  s.emit("session.text.ended", {
+    assistantMessageID: "assistant-2",
+    ordinal: 0,
+    text: "No deltas needed",
+  });
+  await tick();
+  assert.deepEqual(s.frames.slice(secondTurn), [
+    {
+      type: "reply_end",
+      turn: 2,
+      reply: "assistant-2:0",
+      text: "No deltas needed",
+    },
+  ]);
+  await s.bridge.stop();
+});
+
+test("events overtaking prompt response wait for its matching inbox delivery", async () => {
+  let accept;
+  const s = setup({
+    prompt: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "hello" });
+  s.emit("session.inbox.delivered", { inboxID: "foreign" });
+  s.emit("session.step.started", { assistantMessageID: "foreign" });
+  s.emit("session.inbox.delivered", { inboxID: "ours" });
+  s.emit("session.step.started", { assistantMessageID: "ours" });
+  s.emit("session.text.ended", { assistantMessageID: "ours", ordinal: 0, text: "complete answer" });
+  await tick();
+  assert.deepEqual(s.frames, []);
+  accept({ id: "ours" });
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "reply_end", turn: 1, reply: "ours:0", text: "complete answer" },
+  ]);
+  await s.bridge.stop();
+});
+
+test("interrupt is scoped to supervisor; stale prompt callbacks cannot revive a turn", async () => {
+  let accept;
+  const s = setup({
+    prompt: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "hello" });
+  await tick();
+  s.engine({ type: "interrupt", turn: 999 });
+  assert.equal(s.calls.filter(([type]) => type === "interrupt").length, 0);
+  s.engine({ type: "interrupt", turn: 1 });
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "interrupt").length, 0);
+  accept({ id: "late" });
+  await tick();
+  assert.deepEqual(s.calls.find(([type]) => type === "cancel")[1], {
+    sessionID: "session",
+    inboxID: "late",
+  });
+  s.emit("session.step.started", { assistantMessageID: "late" });
+  s.emit("session.text.ended", { assistantMessageID: "late", ordinal: 0, text: "late" });
+  await tick();
+  assert.deepEqual(s.frames, [{ type: "turn_end", turn: 1, reason: "interrupted" }]);
+  await s.bridge.stop();
+});
+
+test("prompt failure and stream EOF never replay a prompt", async () => {
+  const failed = setup({
+    prompt: async () => {
+      throw new Error("offline");
+    },
+  });
+  await failed.bridge.start();
+  failed.engine({ type: "prompt", turn: 1, text: "hello" });
+  await tick();
+  assert.deepEqual(failed.frames, [{ type: "turn_end", turn: 1, reason: "disconnected" }]);
+  assert.equal(failed.bridge.snapshot().status, "off");
+  assert.match(failed.errors[0].message, /admission.*unconfirmed/);
+  await failed.bridge.stop();
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  s.streamClose();
+  await tick();
+  assert.deepEqual(s.frames.at(-1), { type: "turn_end", turn: 1, reason: "disconnected" });
+  assert.equal(s.bridge.snapshot().status, "off");
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  assert.equal(s.calls.filter(([type]) => type === "subscribe").length, 1);
+});
+
+test("stopping during server start cleans up the late session without spawning runtime", async () => {
+  let accept;
+  const s = setup({
+    start: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  const starting = s.bridge.start();
+  await tick();
+  await s.bridge.stop();
+  accept({ sessionID: "session" });
+  await starting;
+  assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+  assert.equal(s.stopped(), 0);
+  assert.equal(s.runtimeStarted(), false);
+  assert.equal(s.bridge.snapshot().status, "off");
 });
