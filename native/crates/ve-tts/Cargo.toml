@@ -1,0 +1,17 @@
+[package]
+name = "ve-tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+description = "Piper synthesis through sherpa-onnx's cancellable C API"
+
+[dependencies]
+anyhow.workspace = true
+# The progress/cancellation entry point is not exposed by the blocking Rust wrapper.
+# This exact release downloads sherpa-onnx 1.12.9 with ONNX Runtime shared libraries.
+sherpa-rs = { version = "=0.6.8", default-features = false, features = [
+  "download-binaries",
+  "tts",
+  "sys",
+] }
