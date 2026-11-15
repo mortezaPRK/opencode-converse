@@ -674,3 +674,378 @@ test("finished inbox history rolls without ending a long conversation or replayi
   assert.deepEqual(s.frames, []);
   await s.bridge.stop();
 });
+
+test("interruption finishes before a newer prompt is submitted and unconfirmed failure closes the bridge", async () => {
+  let release;
+  const s = setup({
+    interrupt: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  await s.bridge.start();
+  await begin(s);
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "next" });
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  release();
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  s.emit("session.execution.interrupted", {});
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 2);
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "inbox-2" });
+  s.emit("session.step.started", { assistantMessageID: "new" });
+  s.emit("session.text.ended", { assistantMessageID: "new", ordinal: 0, text: "next answer" });
+  await tick();
+  assert.deepEqual(s.frames.at(-1), {
+    type: "reply_end",
+    turn: 2,
+    reply: "new:0",
+    text: "next answer",
+  });
+  await s.bridge.stop();
+
+  const failed = setup({
+    interrupt: async () => {
+      throw new Error("transient interrupt");
+    },
+  });
+  await failed.bridge.start();
+  await begin(failed);
+  failed.engine({ type: "interrupt", turn: 1 });
+  failed.engine({ type: "prompt", turn: 2, text: "continue" });
+  await tick();
+  assert.equal(failed.calls.filter(([type]) => type === "prompt").length, 1);
+  assert.equal(failed.bridge.snapshot().status, "off");
+  assert.equal(failed.stopped(), 1);
+  await failed.bridge.stop();
+});
+
+test("a canceled prompt still awaiting its inbox ID is canceled before the next submission", async () => {
+  let accept;
+  let release;
+  let count = 0;
+  const s = setup({
+    prompt: async () =>
+      ++count === 1
+        ? new Promise((resolve) => {
+            accept = resolve;
+          })
+        : { id: "second" },
+    cancel: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "queued" });
+  await tick();
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "next" });
+  await tick();
+  assert.equal(count, 1);
+  accept({ id: "queued-first" });
+  await tick();
+  assert.deepEqual(s.calls.find(([type]) => type === "cancel")[1], {
+    sessionID: "session",
+    inboxID: "queued-first",
+  });
+  assert.equal(count, 1);
+  release();
+  await tick();
+  assert.equal(count, 2);
+  assert.equal(s.calls.filter(([type]) => type === "interrupt").length, 0);
+  await s.bridge.stop();
+});
+
+test("delivery winning queued cancellation is interrupted before submitting the next user prompt", async () => {
+  let rejectCancel;
+  let finishInterrupt;
+  const s = setup({
+    cancel: () =>
+      new Promise((_resolve, reject) => {
+        rejectCancel = reject;
+      }),
+    interrupt: () =>
+      new Promise((resolve) => {
+        finishInterrupt = resolve;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "first" });
+  await tick();
+  s.engine({ type: "interrupt", turn: 1 });
+  s.engine({ type: "prompt", turn: 2, text: "second" });
+  await tick();
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "inbox-1" });
+  s.emit("session.step.started", { assistantMessageID: "old" });
+  await tick();
+  rejectCancel(new Error("inbox already delivered"));
+  await tick();
+  assert.deepEqual(s.calls.find(([type]) => type === "interrupt")[1], {
+    sessionID: "session",
+  });
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+  s.emit("session.execution.interrupted", {});
+  finishInterrupt();
+  await tick();
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 2);
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "inbox-2" });
+  s.emit("session.step.started", { assistantMessageID: "new" });
+  s.emit("session.text.ended", { assistantMessageID: "old", ordinal: 0, text: "stale" });
+  s.emit("session.text.ended", { assistantMessageID: "new", ordinal: 0, text: "fresh" });
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "turn_end", turn: 1, reason: "interrupted" },
+    { type: "reply_end", turn: 2, reply: "new:0", text: "fresh" },
+  ]);
+  await s.bridge.stop();
+});
+
+test("forty thousand deltas and thousands of completed steps keep running without stale replay", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  const oldStep = s.emit("session.step.started", { assistantMessageID: "assistant-1" });
+  const old = s.emit("session.text.delta", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    delta: "a",
+  });
+  for (let i = 0; i < 40_010; i++)
+    s.emit("session.text.delta", { assistantMessageID: "assistant-1", ordinal: 0, delta: "b" });
+  await tick();
+  assert.deepEqual(s.errors, []);
+  const before = s.frames.length;
+  s.emit(old.type, old.data, { id: old.id });
+  await tick();
+  assert.equal(s.frames.length, before);
+  s.emit("session.text.ended", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    text: "a" + "b".repeat(40_010),
+  });
+  await tick();
+  assert.deepEqual(
+    s.frames.filter((frame) => frame.type === "reply_end" && frame.reply === "assistant-1:0"),
+    [{ type: "reply_end", turn: 1, reply: "assistant-1:0", text: "a" + "b".repeat(40_010) }],
+  );
+  for (let i = 0; i < 4100; i++) {
+    s.emit("session.step.started", { assistantMessageID: `step-${i}` });
+    s.emit("session.text.ended", { assistantMessageID: `step-${i}`, ordinal: 0, text: "reply" });
+  }
+  await tick();
+  assert.deepEqual(s.errors, []);
+  assert.notEqual(s.bridge.snapshot().status, "off");
+  assert.equal(s.frames.at(-1).reply, "step-4099:0");
+  const after = s.frames.length;
+  s.emit(oldStep.type, oldStep.data, { durable: oldStep.durable });
+  s.emit("session.text.delta", { assistantMessageID: "assistant-1", ordinal: 0, delta: "stale" });
+  await tick();
+  assert.equal(s.frames.length, after);
+  await s.bridge.stop();
+});
+
+test("UTF-8 reply and announcement clipping is cumulative, codepoint safe and nonfatal", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  for (let i = 0; i < 10; i++)
+    s.emit("session.text.delta", {
+      assistantMessageID: "assistant-1",
+      ordinal: 0,
+      delta: "😀".repeat(10_000),
+    });
+  s.emit("session.text.ended", {
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    text: "😀".repeat(80_000),
+  });
+  s.emit("session.execution.succeeded", {});
+  background(s, "large");
+  s.emit("session.text.ended", { assistantMessageID: "large", ordinal: 0, text: "€".repeat(3100) });
+  await tick();
+  assert.ok(
+    s.frames
+      .filter((frame) => frame.type === "reply_delta")
+      .reduce((n, frame) => n + Buffer.byteLength(frame.text), 0) <= 262_144,
+  );
+  assert.ok(
+    Buffer.byteLength(s.frames.find((frame) => frame.type === "reply_end").text) <= 262_144,
+  );
+  const announcement = s.frames.find((frame) => frame.type === "announcement");
+  assert.ok(Buffer.byteLength(announcement.text) <= 8192);
+  assert.ok(s.frames.every((frame) => !frame.text?.includes("�")));
+  assert.ok(
+    s.frames
+      .filter((frame) => frame.type === "reply_delta")
+      .map((frame) => frame.text)
+      .join("") === "😀".repeat(65_536),
+    "cumulative deltas must retain the exact nonempty prefix",
+  );
+  assert.ok(
+    s.frames.find((frame) => frame.type === "reply_end").text === "😀".repeat(65_536),
+    "completion must retain the exact prefix",
+  );
+  assert.equal(announcement.text, "€".repeat(2730));
+  assert.deepEqual(s.errors, []);
+  await s.bridge.stop();
+});
+
+test("movement and literal alias-location events close immediately, even before prompt response or sequence replay", async () => {
+  for (const moved of [false, true])
+    for (const pending of [false, true]) {
+      let accept;
+      const s = setup({
+        directory: "/tmp/chosen",
+        ...(pending
+          ? {
+              prompt: () =>
+                new Promise((resolve) => {
+                  accept = resolve;
+                }),
+            }
+          : {}),
+      });
+      await s.bridge.start();
+      assert.ok(s.calls.find(([type]) => type === "subscribe")[1].types.includes("session.moved"));
+      s.engine({ type: "prompt", turn: 1, text: "hello" });
+      await tick();
+      s.emit("session.execution.started", {});
+      s.emit(
+        moved ? "session.moved" : "session.text.delta",
+        moved
+          ? { location: { directory: "/elsewhere" }, projectID: "project" }
+          : { assistantMessageID: "alias", ordinal: 0, delta: "must not speak" },
+        {
+          location: { directory: moved ? "/tmp/chosen" : "/private/tmp/chosen" },
+          durable: { aggregateID: "session", seq: 0, version: 1 },
+        },
+      );
+      await tick();
+      assert.match(s.errors[0].message, /moved.*start.*new conversation/i);
+      assert.equal(s.bridge.snapshot().status, "off");
+      assert.equal(
+        s.frames.some((frame) => frame.type === "reply_delta" || frame.type === "announcement"),
+        false,
+      );
+      s.engine({ type: "prompt", turn: 2, text: "cannot retarget" });
+      if (pending) accept({ id: "inbox-1" });
+      await tick();
+      assert.equal(s.calls.filter(([type]) => type === "prompt").length, 1);
+      assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, {
+        directory: "/tmp/chosen",
+      });
+      assert.equal(s.bridge.snapshot().serverID, "remote-server");
+      await s.bridge.stop();
+    }
+});
+
+test("failed prompt preserves buffered fresh worker announcements", async () => {
+  let reject;
+  const s = setup({
+    prompt: () =>
+      new Promise((_resolve, fail) => {
+        reject = fail;
+      }),
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, text: "user" });
+  await tick();
+  background(s, "worker");
+  s.emit("session.text.ended", { assistantMessageID: "worker", ordinal: 0, text: "summary" });
+  await tick();
+  reject({ _tag: "InvalidRequestError", message: "request rejected" });
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "prompt_failed", turn: 1, message: "request rejected" },
+    { type: "announcement", reply: "worker:0", text: "summary" },
+  ]);
+  await s.bridge.stop();
+});
+
+test("server start allocation is not aborted by local stop and its late session is cleaned", async () => {
+  let accept;
+  let signal;
+  const s = setup({
+    start: (_input, options) => {
+      signal = options.signal;
+      return new Promise((resolve) => {
+        accept = resolve;
+      });
+    },
+  });
+  const starting = s.bridge.start();
+  await tick();
+  await s.bridge.stop();
+  assert.equal(signal.aborted, false);
+  accept({ sessionID: "session" });
+  await starting;
+  assert.equal(s.calls.filter(([type]) => type === "stop").length, 1);
+});
+
+test("preempted background events overtaking the new prompt response retain their old ownership", async () => {
+  let accept;
+  const s = setup({
+    prompt: () =>
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+  });
+  await s.bridge.start();
+  background(s, "old");
+  await tick();
+  s.engine({ type: "prompt", turn: 1, text: "new user" });
+  s.emit("session.text.ended", { assistantMessageID: "old", ordinal: 0, text: "stale" });
+  s.emit("session.execution.interrupted", {});
+  s.emit("session.execution.started", {});
+  s.emit("session.inbox.delivered", { inboxID: "ours" });
+  s.emit("session.step.started", { assistantMessageID: "ours" });
+  s.emit("session.text.ended", { assistantMessageID: "ours", ordinal: 0, text: "new answer" });
+  s.emit("session.execution.succeeded", {});
+  await tick();
+  assert.deepEqual(s.frames, []);
+  accept({ id: "ours" });
+  await tick();
+  assert.deepEqual(s.frames, [
+    { type: "reply_end", turn: 1, reply: "ours:0", text: "new answer" },
+    { type: "turn_end", turn: 1, reason: "completed" },
+  ]);
+  await s.bridge.stop();
+});
+
+test("buffered background delivery keeps its receipt generation across hearing or mute", async () => {
+  for (const activity of ["hearing", "mute"]) {
+    let accept;
+    const s = setup({
+      prompt: () =>
+        new Promise((resolve) => {
+          accept = resolve;
+        }),
+    });
+    await s.bridge.start();
+    s.engine({ type: "prompt", turn: 1, text: "user" });
+    background(s, "worker");
+    s.emit("session.text.ended", { assistantMessageID: "worker", ordinal: 0, text: "old summary" });
+    s.emit("session.execution.succeeded", {});
+    await tick();
+    if (activity === "mute") s.bridge.mute();
+    else s.engine({ type: "status", state: "hearing" });
+    accept({ id: "ours" });
+    await tick();
+    assert.deepEqual(
+      s.frames.filter((frame) => frame.type === "announcement"),
+      [],
+    );
+    assert.deepEqual(
+      s.frames.filter((frame) => frame.type === "turn_end"),
+      [],
+    );
+    await s.bridge.stop();
+  }
+});
