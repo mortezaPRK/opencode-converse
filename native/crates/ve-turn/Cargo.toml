@@ -1,0 +1,19 @@
+[package]
+name = "ve-turn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Smart Turn v3 ONNX end-of-turn detection and Whisper log-mel frontend"
+
+[dependencies]
+anyhow.workspace = true
+# Match ve-vad's ORT API and linking strategy; they share one process environment.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+  "std",
+  "api-17",
+  "download-binaries",
+  "tls-native",
+] }
+rustfft = "6"
+realfft = "3.5"
+ve-vad = { path = "../ve-vad" }
