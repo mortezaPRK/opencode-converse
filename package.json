@@ -1,0 +1,71 @@
+{
+  "name": "@mortz.prk/opencode-converse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local, Rust-powered live voice supervisor for OpenCode.",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "LICENSE",
+    "THIRD_PARTY.md",
+    "docs/release-gates.md",
+    "assets/models.json"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    },
+    "./gui-experimental": "./dist/gui-experimental.cjs",
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "import": "./dist/rpc.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src test",
+    "fmt": "oxfmt --check .",
+    "fmt:fix": "oxfmt --write .",
+    "check": "npm run lint && npm run fmt && npm run typecheck",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs",
+    "test:integration": "cargo build --manifest-path native/Cargo.toml -p opencode-converse --locked && npm run build && node --test test/integration/bridge.mjs",
+    "test:host": "npm run build && node --test test/integration/host.mjs",
+    "engine:build": "node native/scripts/build.mjs",
+    "engine:test": "cargo test --manifest-path native/Cargo.toml -p opencode-converse --locked",
+    "engine:models": "cargo run --manifest-path native/Cargo.toml -p opencode-converse --locked -- models install",
+    "engine:fmt": "cargo fmt --manifest-path native/Cargo.toml --all --check",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@opencode/client": "2.3.0",
+    "@opencode/plugin": "2.3.0",
+    "effect": "4.1.0"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
+    "@types/node": "^26.6.5",
+    "oxfmt": "^0.74.0",
+    "oxlint": "^1.89.0",
+    "solid-js": "1.9.19",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vite-plugin-solid": "^2.11.14"
+  },
+  "peerDependencies": {
+    "@opentui/core": "^0.8.4",
+    "@opentui/solid": "^0.8.4",
+    "solid-js": ">=1.9.19"
+  }
+}
