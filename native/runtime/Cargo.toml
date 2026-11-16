@@ -1,0 +1,25 @@
+[package]
+name = "opencode-converse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native-audio = ["dep:ve-audio", "dep:ve-asr", "dep:ve-vad", "dep:ve-turn", "dep:ve-tts"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+fs2 = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
+tar = "0.4"
+bzip2 = "0.6"
+tempfile = "3"
+ve-audio = { path = "../crates/ve-audio", optional = true }
+ve-asr = { path = "../crates/ve-asr", optional = true }
+ve-vad = { path = "../crates/ve-vad", optional = true }
+ve-turn = { path = "../crates/ve-turn", optional = true }
+ve-tts = { path = "../crates/ve-tts", optional = true }

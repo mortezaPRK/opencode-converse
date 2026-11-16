@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+  "runtime",
+  "crates/ve-audio",
+  "crates/ve-asr",
+  "crates/ve-vad",
+  "crates/ve-turn",
+  "crates/ve-tts",
+]
+default-members = ["runtime"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
