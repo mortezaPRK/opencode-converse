@@ -1,0 +1,82 @@
+# Native dependency and model notices
+
+The engine's Cargo manifests declare MIT licensing. Audio/inference source was
+selectively derived from the MIT-declared Rust engine originally imported from
+https://github.com/mortezaPRK/live-speech at
+`c0cf67d22626d7cd4492c6930b5536973820093a`. The private repository and that
+revision were verified through authenticated GitHub API access; an anonymous
+404 is not evidence that the revision is nonexistent. The revision's
+`voice-engine/Cargo.toml` declares `license = "MIT"` for the workspace, but its
+recursive tree contains no LICENSE/COPYING file. Manifest declarations and
+revision existence are provenance evidence, **not a completed license audit**.
+Verification of the actual upstream license grant and required copyright/notices
+remains a redistribution gate. No private source is made public by this notice.
+This is not a runtime dependency. The project license does not relicense
+third-party code or models downloaded by the user.
+
+## Log-mel frontend and reference fixtures
+
+`crates/ve-turn/src/mel.rs` is a modified Rust port of the Whisper normalization,
+STFT/log-mel, and Slaney filterbank math described in Hugging Face Transformers.
+The reference checked for this review is **v4.46.3**, not a claim about the exact
+version originally used by the private upstream:
+
+- [Whisper feature extractor](https://github.com/huggingface/transformers/blob/v4.46.3/src/transformers/models/whisper/feature_extraction_whisper.py):
+  Copyright 2022 The HuggingFace Inc. team; Apache License 2.0.
+- [Audio utilities](https://github.com/huggingface/transformers/blob/v4.46.3/src/transformers/audio_utils.py):
+  Copyright 2023 The HuggingFace Inc. team and the librosa & torchaudio authors;
+  Apache License 2.0. The file attributes filterbank adaptations to torchaudio
+  and librosa; these attributions must not be dropped.
+- [Transformers license](https://github.com/huggingface/transformers/blob/v4.46.3/LICENSE):
+  Apache License 2.0, **not MIT**. Source-port license/notice obligations must be
+  reviewed and retained separately from the project's MIT declaration before
+  distributing the native sources or binaries; this notice is not clearance.
+
+`tests/data/mel_filters.f32` came from the private upstream revision above. Its
+values match the v4.46.3 Slaney filterbank after f32 conversion. The new
+`logmel_{nonzero,silence,left_padded}.f32` fixtures are generated from synthetic
+integer-defined waveforms, not recordings, model outputs, or downloaded models.
+`tests/generate_mel_reference.py` invokes unchanged hash-pinned upstream NumPy
+methods and documents regeneration. Fixtures use little-endian f32, mel-major
+80 × 800 layout; SHA-256 values are:
+
+- nonzero: `86b2be68412b4ad179a142192889c3d2af931aae674915f7483685ed8f29b2c1`
+- silence: `c4a1d90bbbdc1c49cf89b8f73360019b1b0fe01ae48a9dfd6fc2c4a3228b8859`
+- left-padded: `09fa7d997d5f72fdfe8c4827acb4d75580fa150bc6c3ac26cd9977f077356ccb`
+
+## Dependencies and models
+
+The source setup uses these components, among others:
+
+- **whisper-rs 0.16.0** (Rust binding): **Unlicense**, not MIT. Its resolved
+  manifest declares `Unlicense` and its shipped `LICENSE` contains The Unlicense.
+  The crate archive SHA-256 is
+  `2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6`.
+- **whisper-rs-sys 0.15.0** (FFI binding): its manifest also declares
+  **Unlicense**. Both binding archives record upstream revision
+  `7558e1b72f54f2f22a53589afb77e65681834c36` in `.cargo_vcs_info.json`;
+  the [license at that revision](https://codeberg.org/tazz4843/whisper-rs/src/commit/7558e1b72f54f2f22a53589afb77e65681834c36/LICENSE)
+  was verified separately. The sys archive SHA-256 is
+  `6986c0fe081241d391f09b9a071fbcbb59720c3563628c3c829057cf69f2a56f`.
+- **whisper.cpp / bundled GGML source**: separate MIT notice in the resolved
+  sys archive's `whisper.cpp/LICENSE`, Copyright (c) 2023-2024 The ggml authors.
+  Retain that notice independently of the binding's Unlicense. Archive hashes
+  above match `Cargo.lock`; they identify the reviewed source artifacts, not
+  clearance of every resulting native binary or bundled component.
+- ONNX Runtime: MIT.
+- sherpa-rs / sherpa-onnx: see their upstream license and bundled notices.
+- eSpeak NG code and data included by sherpa: GPL-family licensing; do not infer
+  permissive licensing from sherpa's top-level license.
+- Rust dependencies: inspect each crate's license in Cargo.lock's resolved source.
+
+Models are downloaded separately, never included in the npm source package:
+
+- Silero VAD: upstream MIT notices.
+- Smart Turn v3: upstream BSD-2-Clause notices.
+- Whisper: upstream MIT notices.
+- Piper Lessac: inspect its model card and dataset/voice terms.
+
+Before distributing native prebuilts or models, collect the corresponding
+copyright/license notices and review redistribution obligations, especially
+those of eSpeak NG. This change provides explicit source builds, not prebuilt
+native redistribution, and does not claim all dependencies are MIT.
