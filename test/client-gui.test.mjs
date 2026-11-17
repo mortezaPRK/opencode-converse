@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ComposerPill, TitlebarItem } from "@opencode/plugin/gui";
+import gui from "../dist/gui.js";
 import { createMain } from "../dist/gui/main.js";
 import { createBridge } from "../dist/client/bridge.js";
+import { PRESENCE_ERROR_MS } from "../dist/presence.js";
 import { cleanupFixture } from "./client-cleanup-fixture.mjs";
 
 function setup({ stop, start, fixture } = {}) {
@@ -434,4 +437,130 @@ test("GUI disposal ignores intentional startup cancellation and queued pre-start
   );
   await invalid.cleanup();
   assert.equal(invalid.providerDisposed(), 1);
+});
+
+// The window setup only renders through the host, so the test records what it
+// contributes and asks the same reactive thunks the host would read.
+function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
+  const state = { status, sessionID };
+  let titlebar;
+  let pill;
+  let listener;
+  const ctx = {
+    signal: new AbortController().signal,
+    app: { platform: "desktop" },
+    toast: { show: () => {} },
+    sessions: { current: () => undefined },
+    screen: { current: () => undefined },
+    tabs: { open: () => true },
+    add(registry, value) {
+      if (registry === TitlebarItem) titlebar = value;
+      else if (registry === ComposerPill) pill = value;
+    },
+    main: () => ({
+      state: () => ({ ...state }),
+      start: async () => {},
+      stop: async () => {},
+      mute: async () => {},
+      on: (name, handler) => {
+        listener = handler;
+        return () => {
+          listener = undefined;
+        };
+      },
+    }),
+  };
+  const cleanup = gui.setup(ctx);
+  return {
+    state,
+    item: () => (typeof titlebar === "function" ? titlebar() : titlebar),
+    pill,
+    shown: (id = "supervisor") => pill.show({ session: { id } }),
+    fail: (message) => listener?.({ message }),
+    cleanup,
+  };
+}
+
+test("GUI status pill names the state and picks artwork for it", () => {
+  const s = statusSetup();
+  const idle = s.item();
+  assert.equal(idle.label, "Converse: Idle");
+  assert.equal(idle.icon, "waveform");
+  assert.equal(idle.pressed, false);
+  assert.equal(idle.busy, false);
+  assert.match(idle.title, /Not running/);
+
+  s.state.status = "listening";
+  const listening = s.item();
+  assert.equal(listening.label, "Converse: Listening");
+  assert.equal(listening.icon, "outline-wave-audio");
+  assert.equal(listening.pressed, true);
+  assert.match(listening.title, /Mic open/);
+
+  s.state.status = "hearing";
+  assert.equal(s.item().icon, "outline-audio");
+  s.state.status = "thinking";
+  assert.equal(s.item().icon, "outline-brain");
+  s.state.status = "speaking";
+  assert.equal(s.item().icon, "speech-bubble");
+  s.state.status = "muted";
+  assert.equal(s.item().icon, "outline-eye-slash");
+
+  s.state.status = "loading";
+  assert.equal(s.item().busy, true, "the host spinner covers start-up");
+  assert.equal(s.item().pressed, true);
+  s.cleanup();
+});
+
+test("GUI composer chip stays on the supervisor session and offers its actions", () => {
+  const s = statusSetup();
+  assert.equal(s.shown(), undefined, "idle shows no chip");
+
+  s.state.status = "listening";
+  const view = s.shown();
+  assert.equal(view.label, "Converse · Listening");
+  assert.equal(view.icon, "outline-wave-audio");
+  assert.equal(view.tone, "success");
+  assert.match(view.title, /Mic open/);
+  assert.deepEqual(
+    view.rows.map((row) => row.id),
+    ["mute", "open", "stop"],
+  );
+  assert.equal(view.rows[2].tone, "danger");
+  assert.equal(s.shown("worker"), undefined, "other sessions never show it");
+
+  s.state.status = "muted";
+  assert.equal(s.shown().rows[0].label, "Unmute microphone");
+  assert.equal(s.shown().tone, "warning");
+
+  s.state.sessionID = null;
+  assert.equal(s.shown(), undefined, "a stopped bridge has no chip");
+  s.cleanup();
+});
+
+test("GUI errors outlive the idle status and can be dismissed or expire", () => {
+  const s = statusSetup({ status: "thinking" });
+  s.fail("engine crashed");
+  const failed = s.item();
+  assert.equal(failed.label, "Converse: Error");
+  assert.equal(failed.icon, "circle-exclamation");
+  assert.equal(failed.pressed, true, "the running conversation keeps its controls");
+
+  const view = s.shown();
+  assert.equal(view.rows[0].id, "dismiss");
+  assert.equal(view.tone, "danger");
+
+  view.rows[0].run();
+  assert.equal(s.item().label, "Converse: Thinking");
+  s.cleanup();
+});
+
+test("GUI error chip expires after the presence window", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const s = statusSetup({ status: "off" });
+  s.fail("start failed");
+  assert.equal(s.item().label, "Converse: Error");
+  t.mock.timers.tick(PRESENCE_ERROR_MS);
+  assert.equal(s.item().label, "Converse: Idle", "the chip lapses back to the engine state");
+  s.cleanup();
 });
