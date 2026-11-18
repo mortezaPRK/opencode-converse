@@ -76,7 +76,7 @@ test("fixture build refuses a compiler artifact with disabled debug assertions b
             profile: { debug_assertions: false },
           }) + "\n",
       })),
-    /debug-only data isolation/,
+    /debug-only test isolation/,
   );
 });
 

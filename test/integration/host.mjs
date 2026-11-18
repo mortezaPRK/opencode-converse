@@ -246,7 +246,13 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     default_agent: "build",
     plugins: [
       fixture,
-      root,
+      {
+        package: root,
+        options: {
+          supervisorModel: `${model.providerID}/${model.id}`,
+          workerModel: `${model.providerID}/${model.id}`,
+        },
+      },
       "-opencode.provider.ollama",
       "-opencode.provider.lmstudio",
       "-opencode.provider.vllm",
@@ -353,7 +359,9 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     "lazy Converse activation",
     15_000,
   );
-  assert.deepEqual(await rpc.hello(undefined, options()), { protocol: 1 });
+  const hello = await rpc.hello(undefined, options());
+  assert.equal(hello.protocol, 1);
+  assert.ok(hello.packageRoot, "The server must report its package root for the local GUI engine");
   const info = await client.server.info();
   assert.match(info.version, /^2\.3\./, "This regression targets the installed 2.3 host contract");
   const agents = await client.agent.list({ location });
@@ -369,6 +377,17 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     agent.permissions.slice(2).every((rule) => rule.effect === "deny"),
     "Host-added capability rules must not broaden supervisor access",
   );
+  const workerAgent = agents.data.find((entry) => entry.id === "converse-worker");
+  assert.ok(workerAgent, "The dedicated worker agent must be registered");
+  assert.equal(workerAgent.hidden, true);
+  assert.equal(workerAgent.mode, "primary");
+  const workerProbe = await client.session.create({
+    title: "Worker agent probe",
+    agent: "converse-worker",
+    model,
+    location,
+  });
+  assert.equal(workerProbe.agent, "converse-worker");
   const tools = await observe.inspect(undefined, options()).catch((error) => {
     throw new Error(`Observer inspect: ${JSON.stringify(error)}\n${output}`);
   });
@@ -378,7 +397,8 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     assert.equal(tool.options.codemode, false);
     assert.equal(tool.options.permission, "converse");
   }
-  const { sessionID } = await rpc.start({ model }, options());
+  const { sessionID, runtime } = await rpc.start(undefined, options());
+  assert.deepEqual(runtime, {});
   const owned = await client.session.get({ sessionID });
   t.diagnostic(
     `Literal location guard: requested=${JSON.stringify(directory)}; reported=${JSON.stringify(owned.location.directory)}; matchingEvents=0 (before owned turn)`,
@@ -397,7 +417,7 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     location,
     metadata: owned.metadata,
   });
-  const wrongAgent = await rpc.start({ model }, options());
+  const wrongAgent = await rpc.start(undefined, options());
   await client.session.switchAgent({ sessionID: wrongAgent.sessionID, agent: "build" });
   for (const invalid of [ordinary.id, forged.id, wrongAgent.sessionID]) {
     for (const name of names) {

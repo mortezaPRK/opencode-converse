@@ -13,10 +13,20 @@ pub struct Settings {
     pub input_device: Option<String>,
     #[serde(default, deserialize_with = "device")]
     pub output_device: Option<String>,
+    #[serde(default)]
+    pub asr_threads: Option<u16>,
+    #[serde(default)]
+    pub tts_threads: Option<u16>,
+    #[serde(default)]
+    pub use_gpu: Option<bool>,
 }
 
 fn device<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     String::deserialize(d).map(Some)
+}
+
+fn valid_threads(value: Option<u16>) -> bool {
+    value.is_none_or(|threads| (1..=256).contains(&threads))
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,7 +34,7 @@ fn device<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::E
 pub enum Host {
     Init {
         protocol: u32,
-        settings: Settings,
+        settings: Box<Settings>,
     },
     ReplyDelta {
         turn: u64,
@@ -80,6 +90,9 @@ impl Host {
                     {
                         return Err("Invalid device name");
                     }
+                }
+                if !valid_threads(settings.asr_threads) || !valid_threads(settings.tts_threads) {
+                    return Err("Invalid speech thread count");
                 }
             }
             Self::ReplyDelta { turn, reply, text } | Self::ReplyEnd { turn, reply, text } => {
@@ -171,7 +184,7 @@ mod tests {
                 assert_eq!(
                     Host::Init {
                         protocol: VERSION,
-                        settings
+                        settings: Box::new(settings)
                     }
                     .validate()
                     .is_ok(),
@@ -180,6 +193,22 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn configured_inference_limits_are_bounded() {
+        let valid: Host = serde_json::from_str(
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"useGpu":false}}"#,
+        )
+        .unwrap();
+        assert!(valid.validate().is_ok());
+        for value in [
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":0}}"#,
+            r#"{"type":"init","protocol":1,"settings":{"ttsThreads":257}}"#,
+        ] {
+            let message: Host = serde_json::from_str(value).unwrap();
+            assert!(message.validate().is_err(), "{value}");
+        }
+    }
+
     #[test]
     fn strict_contract() {
         for s in [

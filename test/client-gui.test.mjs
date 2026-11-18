@@ -7,7 +7,7 @@ import { createBridge } from "../dist/client/bridge.js";
 import { PRESENCE_ERROR_MS } from "../dist/presence.js";
 import { cleanupFixture } from "./client-cleanup-fixture.mjs";
 
-function setup({ stop, start, fixture } = {}) {
+function setup({ stop, start, fixture, options } = {}) {
   let implementation;
   let closeWindow;
   let changes = 0;
@@ -33,6 +33,12 @@ function setup({ stop, start, fixture } = {}) {
   const errors = [];
   const ctx = {
     signal: new AbortController().signal,
+    options: options ?? {},
+    client: {
+      rpc: () => ({
+        hello: async () => ({ protocol: 1, packageRoot: "/local/package" }),
+      }),
+    },
     storage: {
       store: (name) => {
         assert.equal(name, "devices");
@@ -121,13 +127,11 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
   const target = {
     serverID: "remote",
     directory: "/project",
-    model: { providerID: "p", id: "m", variant: "v" },
     url: "https://attacker.example",
     executable: "/attacker",
   };
   await s.api.start(target, s.caller(1));
   target.directory = "/changed";
-  target.model.id = "changed";
   s.credentials.authorization = "changed";
   assert.deepEqual(s.clients[0].authenticatedEndpoint, {
     baseUrl: "https://chosen.example",
@@ -136,12 +140,12 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
   assert.deepEqual(s.bridges[0].options.target, {
     serverID: "remote",
     directory: "/project",
-    model: { providerID: "p", id: "m", variant: "v" },
   });
   assert.deepEqual(s.bridges[0].options.settings, {
     inputDevice: "host-mic",
     outputDevice: "host-speaker",
   });
+  assert.equal(s.bridges[0].options.packageRoot, "/local/package");
   assert.deepEqual(s.api.state(2), {
     status: "listening",
     serverID: "remote",
@@ -152,6 +156,20 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
   assert.equal(s.clients[1].authenticatedEndpoint.baseUrl, "http://127.0.0.1:4096");
   assert.equal(s.bridges[1].options.target.serverID, "sidecar");
   await s.cleanup();
+});
+
+test("GUI passes inference tuning and rejects invalid values", async () => {
+  const s = setup({ options: { asrThreads: 2, useGpu: false } });
+  await s.api.start({ serverID: "remote", directory: "/chosen" }, s.caller(1));
+  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2, useGpu: false });
+  await s.cleanup();
+
+  const invalid = setup({ options: { asrThreads: 0 } });
+  await assert.rejects(
+    invalid.api.start({ serverID: "remote", directory: "/chosen" }, invalid.caller(1)),
+    /between 1 and 256/,
+  );
+  await invalid.cleanup();
 });
 
 test("owner close cannot stop a replacement already queued by another window", async () => {

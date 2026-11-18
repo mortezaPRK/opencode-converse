@@ -167,13 +167,7 @@ for (const [label, name, accepted] of [
 
 function storageEnvironment(inherited, key, value) {
   const env = { ...inherited };
-  const controlled = new Set([
-    "HOME",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-    "OPENCODE_CONVERSE_DEV_DATA_DIR",
-    "XDG_DATA_HOME",
-  ]);
+  const controlled = new Set(["HOME", "LOCALAPPDATA", "USERPROFILE", "XDG_DATA_HOME"]);
   for (const name of Object.keys(env)) if (controlled.has(name.toUpperCase())) delete env[name];
   env[key] = value;
   // Node/libuv may restore required Windows variables omitted from an env block.
@@ -193,8 +187,6 @@ test("invalid storage test environment removes all inherited case variants", () 
     USERPROFILE: "inherited",
     UserProfile: "inherited",
     userprofile: "inherited",
-    OPENCODE_CONVERSE_DEV_DATA_DIR: "inherited",
-    Opencode_Converse_Dev_Data_Dir: "inherited",
     XDG_DATA_HOME: "inherited",
     Xdg_Data_Home: "inherited",
     UNCHANGED: "kept",
@@ -286,9 +278,14 @@ async function localDir(t) {
 
 async function runtime(t, args = ["run", "--test-fixture"], dir) {
   dir ??= await localDir(t);
-  const child = spawn(executable, args, {
+  const isolated =
+    args.includes("--test-fixture") ||
+    args.includes("--test-fixture-loading") ||
+    (args[0] === "doctor" && !args.includes("--test-only-inference"));
+  const command = isolated ? [...args, "--test-state-dir", dir] : args;
+  const child = spawn(executable, command, {
     cwd: root,
-    env: { ...process.env, OPENCODE_CONVERSE_DEV_DATA_DIR: dir },
+    env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const frames = [];

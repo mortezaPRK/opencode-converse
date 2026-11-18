@@ -150,6 +150,7 @@ pub struct Capture {
     worker: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 /// Worker-side capture delivery. `Gap` invalidates incomplete capture processing;
@@ -212,7 +213,9 @@ impl Capture {
         anyhow::ensure!(channels > 0, "Input device returned zero channels");
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
-        let error = failed.clone();
+        let failure = Arc::new(Mutex::new(None::<String>));
+        let capture_failed = failed.clone();
+        let capture_failure = failure.clone();
         let (mut producer, consumer) =
             rtrb::RingBuffer::<InputFrame>::new((rate as usize / 2).max(4096));
         let gap_generation = Arc::new(AtomicU64::new(0));
@@ -230,8 +233,12 @@ impl Capture {
                         &callback_gap,
                     );
                 },
-                move |_| {
-                    error.store(true, Ordering::Release);
+                move |stream_error| {
+                    // Keep the device's own text; a bool alone is undiagnosable.
+                    if let Ok(mut slot) = capture_failure.lock() {
+                        slot.get_or_insert_with(|| stream_error.to_string());
+                    }
+                    capture_failed.store(true, Ordering::Release);
                 },
                 None,
             )
@@ -254,10 +261,15 @@ impl Capture {
             worker: Some(worker),
             stop,
             failed,
+            failure,
         })
     }
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
+    }
+    /// Device-reported reason the input stream stopped, when the device gave one.
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|slot| slot.clone())
     }
 }
 impl Drop for Capture {
@@ -1085,6 +1097,7 @@ mod tests {
             worker: Some(worker),
             stop,
             failed,
+            failure: Arc::new(Mutex::new(None)),
         };
         ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(

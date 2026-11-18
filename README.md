@@ -19,6 +19,9 @@ The current SDK target is OpenCode **2.3.0**.
   client and adds terminal/Desktop controls.
 - The supervisor and worker sessions run on the selected OpenCode server. Audio
   and speech models stay local, including when that server is remote.
+- The plugin owns both agents it uses: a hidden `converse` supervisor and a
+  hidden `converse-worker` coding worker. Neither is selectable in normal agent
+  lists, and workers never fall back to an OpenCode-provided agent.
 - English speech is the initial scope. Permission requests are announced, but
   approvals happen in OpenCode's normal interface.
 - The microphone starts only on an explicit command. Stopping a conversation
@@ -36,37 +39,60 @@ npm run build
 npm run engine:build
 ```
 
-The engine executable is built under `native/target/release/` (`.exe` on Windows).
-Model installation and diagnostics are explicit local operations:
+The engine is built under `native/target/release/` (`.exe` on Windows). Stage it
+into the npm package before packing:
 
 ```sh
-native/target/release/opencode-converse models install
-native/target/release/opencode-converse doctor
+npm run engine:build
+npm run engine:stage
+```
+
+The plugin copies the staged engine and its shared libraries into the fixed app
+state folder on first use. There is no engine path option and no environment
+override. If models are missing, the runtime error prints the exact installed
+engine path to run. Model installation and diagnostics are explicit local
+operations:
+
+```sh
+<state>/bin/<version>/opencode-converse models install
+<state>/bin/<version>/opencode-converse doctor
 ```
 
 Model URLs, sizes, and SHA-256 digests are recorded in
-[`assets/models.json`](assets/models.json). No weights are shipped in the npm
+[`assets/models.json`](assets/models.json). The same file defines the VAD, turn,
+ASR, and TTS roles and their runtime paths. No weights are shipped in the npm
 package. Review the asset terms before downloading or redistributing them.
+Models stay in `<state>/models`, so they are reused when the engine version
+changes.
 
-Set `CONVERSE_BIN` in the environment of the local OpenCode process to the
-absolute engine executable path for development. Do not put an executable path
-in OpenCode plugin options. For Desktop, the environment must be available to the
-Desktop app itself, not just a terminal that is already running.
-
-Add the **package root** to your global `opencode.jsonc`:
+Add the **package root** to your global `opencode.jsonc`. Converse requires
+explicit supervisor and worker models:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/absolute/path/to/opencode-converse"],
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-converse",
+      "options": {
+        "supervisorModel": "provider/supervisor-model",
+        "workerModel": "provider/worker-model",
+      },
+    },
+  ],
 }
 ```
 
+The full option list, model reference forms, speech-model overrides, and path
+rules are documented in [configuration](docs/configuration.md) and
+[`options.schema.json`](docs/options.schema.json).
+
 The server, terminal, and Desktop entries are one plugin package. For a remote
-connection, configure the plugin on the remote server too. Desktop loads its UI
-entry from its own local server; its voice commands target the server selected
-when the conversation starts. Rebuild, then use `/reload` to reload development
-changes.
+connection, configure the plugin on the remote server too. The Rust engine and
+speech models always stay in the local app state folder of the machine running
+the UI. Desktop loads its UI entry from its own local server; its voice commands
+target the server selected when the conversation starts. Rebuild, then use
+`/reload` to reload development changes.
 
 ## Use
 
@@ -90,21 +116,26 @@ the supervisor session.
 
 ## Configuration
 
-The default experience needs no plugin options. The supervisor uses the selected
-OpenCode model unless a server-side override is set. OpenCode owns provider
-credentials; they are never passed to the Rust process.
+Converse is configured through plugin options. `supervisorModel` and
+`workerModel` are required; there is no implicit fallback to the composer
+selection or to an OpenCode-provided agent. Each accepts `"provider/model"`,
+`"provider/model#variant"`, or the object form
+`{ "providerID": "…", "id": "…", "variant": "…" }`.
 
-Server options are limited to `supervisorModel`, `workerModel`, and `workerAgent`.
-Model overrides use `{ "providerID": "…", "id": "…", "variant": "…" }`, with
-`variant` optional. Local device preferences belong to host storage, not remote
-or project configuration.
+The engine and speech-model locations are fixed under the app state folder.
+There is no engine, data, or model path option and no `CONVERSE_BIN` override.
+The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
+and speech models stay in `<state>/models` so they are reused across engine
+versions. `asrThreads`, `ttsThreads`, and `useGpu` are the only runtime tuning
+options. OpenCode owns provider credentials; they are never passed to the Rust
+process. Device preferences stay in host storage.
 
 Each conversation keeps its original server and workspace target. Changing tabs
 does not redirect a running conversation. Stop and start to select another target.
 Use a consistent workspace path: OpenCode treats symlink and other path spellings
 as separate locations. Delegation can reach known saved projects and worktrees
-across the selected server, not only the active project. Workers use the trusted
-configured/default agent and its normal OpenCode permissions.
+across the selected server, not only the active project. Workers always use the
+hidden `converse-worker` agent and its normal OpenCode permission rules.
 
 ## Verify
 

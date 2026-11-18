@@ -2,11 +2,18 @@
 use anyhow::{ensure, Context, Result};
 use sherpa_rs::sherpa_rs_sys as sys;
 use std::ffi::{c_void, CString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+pub struct TtsConfig {
+    pub model: PathBuf,
+    pub tokens: PathBuf,
+    pub data_dir: PathBuf,
+    pub num_threads: i32,
+}
 
 pub struct Tts {
     ptr: *const sys::SherpaOnnxOfflineTts,
@@ -32,16 +39,30 @@ fn cpath(path: &Path) -> Result<CString> {
 }
 
 impl Tts {
-    pub fn new(dir: impl AsRef<Path>) -> Result<Self> {
-        let dir = dir.as_ref().join("vits-piper-en_US-lessac-medium");
-        let model = cpath(&dir.join("en_US-lessac-medium.onnx"))?;
-        let tokens = cpath(&dir.join("tokens.txt"))?;
-        let data = cpath(&dir.join("espeak-ng-data"))?;
+    pub fn new(config: TtsConfig) -> Result<Self> {
+        ensure!(
+            config.model.is_file(),
+            "Piper model not found at {}; set \"ttsModel\" or run opencode-converse doctor",
+            config.model.display()
+        );
+        ensure!(
+            config.tokens.is_file(),
+            "Piper tokens not found at {}; set \"ttsTokens\" or run opencode-converse doctor",
+            config.tokens.display()
+        );
+        ensure!(
+            config.data_dir.is_dir(),
+            "Piper data directory not found at {}; set \"ttsDataDir\" or run opencode-converse doctor",
+            config.data_dir.display()
+        );
+        let model = cpath(&config.model)?;
+        let tokens = cpath(&config.tokens)?;
+        let data = cpath(&config.data_dir)?;
         let empty = CString::new("")?;
         let cpu = CString::new("cpu")?;
         let ptr = unsafe {
             let mut cfg: sys::SherpaOnnxOfflineTtsConfig = std::mem::zeroed();
-            cfg.model.num_threads = 4;
+            cfg.model.num_threads = config.num_threads.max(1);
             cfg.model.debug = 0;
             cfg.model.provider = cpu.as_ptr();
             cfg.max_num_sentences = 1;
@@ -58,8 +79,8 @@ impl Tts {
         };
         ensure!(
             !ptr.is_null(),
-            "Piper failed to load from {}; run opencode-converse doctor",
-            dir.display()
+            "Piper failed to load model {}; run opencode-converse doctor",
+            config.model.display()
         );
         let rate = unsafe { sys::SherpaOnnxOfflineTtsSampleRate(ptr) };
         if rate <= 0 {

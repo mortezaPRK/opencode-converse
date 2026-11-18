@@ -136,11 +136,7 @@ function setup({
       },
     },
   };
-  const target = {
-    serverID: "remote-server",
-    directory,
-    model: { providerID: "provider", id: "model", variant: "high" },
-  };
+  const target = { serverID: "remote-server", directory };
   let stopped = 0;
   const bridge = createBridge({
     client,
@@ -1795,17 +1791,16 @@ test(
   },
 );
 
-test("bridge snapshots authenticated client, location and model; runtime receives no endpoint", async () => {
+test("bridge snapshots authenticated client and location; runtime receives no endpoint", async () => {
   const s = setup();
   s.target.directory = "/changed";
-  s.target.model.id = "changed";
   await s.bridge.start();
   assert.deepEqual(Object.keys(s.runtimeOptions()).sort(), ["onError", "onMessage", "settings"]);
   assert.deepEqual(s.runtimeOptions().settings, { inputDevice: "mic" });
   assert.equal(typeof s.runtimeOptions().onError, "function");
   assert.equal(typeof s.runtimeOptions().onMessage, "function");
   const call = s.calls.find(([type]) => type === "start");
-  assert.deepEqual(call[1], { model: { providerID: "provider", id: "model", variant: "high" } });
+  assert.equal(call[1], undefined);
   assert.deepEqual(call[2].location, { directory: "/chosen" });
   assert.deepEqual(s.bridge.snapshot(), {
     serverID: "remote-server",
@@ -1968,4 +1963,12 @@ test("stopping during server start cleans up the late session without spawning r
   assert.equal(s.stopped(), 0);
   assert.equal(s.runtimeStarted(), false);
   assert.equal(s.bridge.snapshot().status, "off");
+});
+
+test("server-returned inference tuning reaches the local runtime", async () => {
+  const runtime = { asrThreads: 2, ttsThreads: 3, useGpu: false };
+  const s = setup({ start: async () => ({ sessionID: "session", runtime }) });
+  await s.bridge.start();
+  assert.deepEqual(s.runtimeOptions().runtime, runtime);
+  await s.bridge.stop();
 });

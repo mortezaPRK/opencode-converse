@@ -7,6 +7,7 @@ import {
   BoundedSeen,
   Supervisor,
   SUPERVISOR_KEY,
+  WORKER_AGENT,
   WORKER_KEY,
   TOOL_SCHEMAS,
   parseOptions,
@@ -78,8 +79,13 @@ function fixture(directory = "/project") {
     },
     worktree: { list: async () => [{ directory: "/saved-worktree" }] },
   };
-  const service = new Supervisor(ctx, {});
-  return { ctx, service, sessions, storage, prompts, notices, interruptions };
+  const model = { providerID: "test", id: "model" };
+  const service = new Supervisor(ctx, {
+    supervisorModel: model,
+    workerModel: model,
+    runtime: {},
+  });
+  return { ctx, service, model, sessions, storage, prompts, notices, interruptions };
 }
 
 async function worker(f) {
@@ -1417,11 +1423,15 @@ test("uncertain initial prompt reporting stays inside the stop admission gate", 
   assert.equal(f.service.deliveries.size, 0);
 });
 
-test("stop wins during project, agent, or model lookup without creating a worker", async () => {
-  for (const lookup of ["project", "agent", "model"]) {
+test("stop wins during project or model lookup without creating a worker", async () => {
+  for (const lookup of ["project", "model"]) {
     const f = fixture();
     const { sessionID } = await f.service.start();
-    const service = new Supervisor(f.ctx, { workerModel: { providerID: "test", id: "model" } });
+    const service = new Supervisor(f.ctx, {
+      supervisorModel: { providerID: "test", id: "model" },
+      workerModel: { providerID: "test", id: "model" },
+      runtime: {},
+    });
     const target = lookup === "project" ? f.ctx.session : f.ctx[lookup];
     const original = target.list;
     const entered = deferred();
@@ -1705,36 +1715,60 @@ test("failed rollback preserves the registration error and reports the exact orp
   }
 });
 
-test("server options reject local-machine options, unknown fields, and malformed models", () => {
+test("server options validate models, runtime paths, and reject unknown fields", () => {
   for (const value of [
     { executable: "bad" },
     { modelPath: "bad" },
+    { workerAgent: "build" },
+    { engine: "/opt/engine" },
+    { dataDir: "/data" },
+    { modelsDir: "/models" },
+    { vadModel: "silero-vad" },
     { supervisorModel: { providerID: "p", id: "m", path: "bad" } },
-    { workerAgent: " " },
+    { supervisorModel: "not-a-reference" },
     { workerModel: { providerID: "", id: "m" } },
+    { asrThreads: 0 },
+    { ttsThreads: 257 },
+    { useGpu: "yes" },
   ]) {
     assert.throws(() => parseOptions(value));
   }
   assert.deepEqual(
     parseOptions({
-      workerAgent: "build",
+      supervisorModel: "p/m#fast",
       workerModel: { providerID: "p", id: "m", variant: "fast" },
+      asrThreads: 2,
+      ttsThreads: 3,
+      useGpu: false,
     }),
     {
-      workerAgent: "build",
+      supervisorModel: { providerID: "p", id: "m", variant: "fast" },
       workerModel: { providerID: "p", id: "m", variant: "fast" },
+      runtime: { asrThreads: 2, ttsThreads: 3, useGpu: false },
     },
   );
+  assert.deepEqual(parseOptions({ $schema: "ignored" }), { runtime: {} });
+  assert.deepEqual(parseOptions({}), { runtime: {} });
 });
 
 test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.equal(Converse.id, "converse");
   assert.deepEqual(Object.keys(Converse.methods), ["hello", "start", "stop"]);
-  const input = Converse.methods.start.input["~standard"];
-  assert.deepEqual(await input.validate({ model: { providerID: "p", id: "m" } }), {
-    value: { model: { providerID: "p", id: "m" } },
+  const hello = Converse.methods.hello.output["~standard"];
+  assert.deepEqual(await hello.validate({ protocol: 1, packageRoot: "/pkg" }), {
+    value: { protocol: 1, packageRoot: "/pkg" },
   });
-  assert.ok((await input.validate({ directory: "/outside" })).issues);
+  assert.ok((await hello.validate({ protocol: 1, extra: true })).issues);
+  const input = Converse.methods.start.input["~standard"];
+  assert.deepEqual(await input.validate(undefined), { value: undefined });
+  assert.ok((await input.validate({ model: { providerID: "p", id: "m" } })).issues);
+  assert.deepEqual(
+    await Converse.methods.start.output["~standard"].validate({
+      sessionID: "s",
+      runtime: { asrThreads: 2, useGpu: false },
+    }),
+    { value: { sessionID: "s", runtime: { asrThreads: 2, useGpu: false } } },
+  );
   assert.ok((await Converse.methods.stop.input["~standard"].validate({ sessionID: "" })).issues);
 });
 
@@ -2411,19 +2445,29 @@ test("dedupe storage is bounded", () => {
   assert.equal(seen.add("a"), true);
 });
 
-test("worker agent is trusted configuration only, never model input", async () => {
+test("workers always use the dedicated hidden voice agent, never model input", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
+  const supervisor = f.sessions.get(sessionID);
+  assert.equal(supervisor.agent, AGENT);
+  assert.deepEqual(supervisor.model, f.model);
   assert.equal("agent" in TOOL_SCHEMAS.start_session.properties, false);
   await assert.rejects(
     f.service.execute("start_session", { task: "work", agent: "build" }, sessionID),
     /Unknown option: agent/,
   );
-  const configured = new Supervisor(f.ctx, { workerAgent: "build" });
-  await configured.execute("start_session", { task: "work" }, sessionID);
-  assert.equal([...f.sessions.values()].at(-1).agent, "build");
-  const forbidden = new Supervisor(f.ctx, { workerAgent: AGENT });
-  await assert.rejects(forbidden.execute("start_session", { task: "work" }, sessionID));
+  await f.service.execute("start_session", { task: "work" }, sessionID);
+  const created = [...f.sessions.values()].at(-1);
+  assert.equal(created.agent, WORKER_AGENT);
+  assert.deepEqual(created.model, f.model);
+  const original = f.ctx.session.create;
+  f.ctx.session.create = async (input) => ({ ...(await original(input)), agent: "build" });
+  await assert.rejects(
+    f.service.execute("start_session", { task: "work" }, sessionID),
+    /dedicated "converse-worker" agent/,
+  );
+  assert.equal([...f.sessions.values()].filter((item) => item.metadata?.[WORKER_KEY]).length, 1);
+  assert.equal([...f.storage.keys()].filter((key) => key.startsWith("workers/")).length, 1);
 });
 
 test("known projects remain server-wide while foreign-project workers retain this owner", async () => {
@@ -2525,35 +2569,48 @@ test("worker watcher reconnects after errors and EOF, but abort prevents another
 
 test("models are resolved at the selected location with known variants", async () => {
   const f = fixture();
-  await assert.rejects(f.service.start({ providerID: "test", id: "unknown" }), /unavailable/);
-  await assert.rejects(
-    f.service.start({ providerID: "test", id: "model", variant: "invented" }),
-    /Unknown model variant/,
-  );
+  const unavailable = new Supervisor(f.ctx, {
+    supervisorModel: { providerID: "test", id: "unknown" },
+    workerModel: f.model,
+    runtime: {},
+  });
+  await assert.rejects(unavailable.start(), /unavailable/);
+  const invented = new Supervisor(f.ctx, {
+    supervisorModel: { providerID: "test", id: "model", variant: "invented" },
+    workerModel: f.model,
+    runtime: {},
+  });
+  await assert.rejects(invented.start(), /variant.*unavailable/);
   const model = { providerID: "test", id: "model", variant: "fast" };
-  const { sessionID } = await f.service.start(model);
+  const pinned = new Supervisor(f.ctx, {
+    supervisorModel: model,
+    workerModel: f.model,
+    runtime: {},
+  });
+  const { sessionID } = await pinned.start();
   assert.deepEqual(f.sessions.get(sessionID).model, model);
 });
 
-test("configured supervisor model pins the selection; otherwise the UI model is used", async () => {
+test("start requires explicit supervisor and worker models and returns runtime options", async () => {
   const f = fixture();
-  const configured = { providerID: "pinned-provider", id: "pinned-model", variant: "fast" };
-  const ui = { providerID: "test", id: "model" };
-  f.ctx.model.list = async ({ location }) => {
-    assert.deepEqual(location, { directory: "/project" });
-    return {
-      data: [configured, ui].map((model) => ({
-        ...model,
-        enabled: true,
-        variants: [{ id: "fast" }],
-      })),
-    };
-  };
-  const pinned = new Supervisor(f.ctx, { supervisorModel: configured });
-  const started = await pinned.start(ui);
-  assert.deepEqual(f.sessions.get(started.sessionID).model, configured);
-  const unpinned = await f.service.start(ui);
-  assert.deepEqual(f.sessions.get(unpinned.sessionID).model, ui);
+  await assert.rejects(
+    new Supervisor(f.ctx, { runtime: {} }).start(),
+    /supervisorModel.*workerModel/,
+  );
+  await assert.rejects(
+    new Supervisor(f.ctx, { supervisorModel: f.model, runtime: {} }).start(),
+    /workerModel/,
+  );
+  const runtime = { asrThreads: 2, useGpu: false };
+  const started = await new Supervisor(f.ctx, {
+    supervisorModel: f.model,
+    workerModel: f.model,
+    runtime,
+  }).start();
+  assert.deepEqual(started.runtime, runtime);
+  const supervisor = f.sessions.get(started.sessionID);
+  assert.equal(supervisor.agent, AGENT);
+  assert.deepEqual(supervisor.model, f.model);
 });
 
 test("distinct terminal events are announced even when their starts were not observed", async () => {
@@ -2620,9 +2677,10 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
       disposed.push(name);
     },
   });
+  const agents = {};
   const ctx = {
     ...f.ctx,
-    options: {},
+    options: { supervisorModel: f.model, workerModel: f.model },
     agent: {
       ...f.ctx.agent,
       transform: async (edit) => {
@@ -2630,13 +2688,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
           update: (id, update) => {
             const agent = {};
             update(agent);
-            assert.equal(id, AGENT);
-            assert.equal(agent.hidden, true);
-            assert.equal(agent.mode, "primary");
-            assert.deepEqual(agent.permissions, [
-              { action: "*", resource: "*", effect: "deny" },
-              { action: "converse", resource: "*", effect: "allow" },
-            ]);
+            agents[id] = agent;
           },
         });
         return registration("agent");
@@ -2686,6 +2738,20 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     },
   };
   const cleanup = await plugin.setup(ctx);
+  assert.deepEqual(Object.keys(agents).sort(), [AGENT, WORKER_AGENT].sort());
+  assert.equal(agents[AGENT].hidden, true);
+  assert.equal(agents[AGENT].mode, "primary");
+  assert.deepEqual(agents[AGENT].permissions, [
+    { action: "*", resource: "*", effect: "deny" },
+    { action: "converse", resource: "*", effect: "allow" },
+  ]);
+  assert.equal(agents[WORKER_AGENT].hidden, true);
+  assert.equal(agents[WORKER_AGENT].mode, "primary");
+  assert.ok(agents[WORKER_AGENT].system);
+  assert.deepEqual(agents[WORKER_AGENT].permissions.slice(0, 2), [
+    { action: "*", resource: "*", effect: "allow" },
+    { action: "converse", resource: "*", effect: "deny" },
+  ]);
   assert.equal(registeredTools.length, 6);
   for (const tool of registeredTools) {
     assert.deepEqual(tool.options, {
@@ -2695,8 +2761,11 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     });
     await assert.rejects(tool.execute({}, { sessionID: "forged-supervisor" }), /owning Converse/);
   }
-  assert.deepEqual(await rpc.hello(), { protocol: 1 });
-  const { sessionID } = await rpc.start({});
+  const hello = await rpc.hello();
+  assert.equal(hello.protocol, 1);
+  assert.ok(hello.packageRoot);
+  const { sessionID, runtime } = await rpc.start();
+  assert.deepEqual(runtime, {});
   const event = {
     sessionID,
     agent: AGENT,

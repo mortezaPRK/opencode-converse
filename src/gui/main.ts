@@ -2,6 +2,8 @@ import { OpenCode } from "@opencode/client";
 import type { Plugin } from "@opencode/plugin/gui";
 import { createBridge, isStoppedError, type Snapshot } from "../client/bridge.js";
 import { localSettings } from "../client/runtime.js";
+import { parseRuntimeConfig } from "../config.js";
+import { Converse } from "../rpc.js";
 import { ConverseDesktop, Devices } from "./contract.js";
 
 export function createMain(
@@ -69,14 +71,29 @@ export function createMain(
             headers: { ...endpoint.headers },
           });
           owner = caller.window;
+          const runtimeConfig = parseRuntimeConfig(ctx.options);
+          let packageRoot: string | undefined;
+          try {
+            const hello = await ctx.client.rpc(Converse).hello(undefined, {
+              signal: AbortSignal.any([caller.signal, AbortSignal.timeout(5000)]),
+            });
+            packageRoot = hello.packageRoot;
+          } catch (error) {
+            throw new Error(
+              "Converse could not read the local plugin package; restart OpenCode or reinstall the plugin.",
+              { cause: error },
+            );
+          }
+          if (!packageRoot)
+            throw new Error(
+              "Converse's local plugin did not report its package root; reinstall the plugin.",
+            );
           const current = (dependencies.bridge ?? createBridge)({
             client,
-            target: {
-              serverID: input.serverID,
-              directory: input.directory,
-              ...(input.model ? { model: { ...input.model } } : {}),
-            },
+            target: { serverID: input.serverID, directory: input.directory },
             settings: localSettings(prefs.value),
+            packageRoot,
+            ...(Object.keys(runtimeConfig).length ? { runtimeConfig } : {}),
             onChange(next) {
               if (disposed || bridge !== current) return;
               state = next;

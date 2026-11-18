@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { isAbsolute } from "node:path";
 
 export function buildFixture(root, spawn = spawnSync, env = process.env) {
-  // The dev-only data root must never be disabled by an inherited profile.
+  // Debug assertions gate fixture mode and the test-only state-dir flag.
   const buildEnv = { ...env, CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true" };
   const built = spawn(
     "cargo",
@@ -34,7 +34,7 @@ export function buildFixture(root, spawn = spawnSync, env = process.env) {
   assert.equal(
     artifacts[0].profile?.debug_assertions,
     true,
-    "fixture executable must retain debug-only data isolation",
+    "fixture executable must retain debug-only test isolation",
   );
   const executable = artifacts[0].executable;
   assert.equal(isAbsolute(executable), true, "Cargo must report an absolute executable path");

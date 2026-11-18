@@ -113,7 +113,7 @@ function server(directory, changed) {
         },
         start: async (input, options) => {
           checkLocation(options);
-          assert.deepEqual(input, { model });
+          assert.equal(input, undefined);
           calls.push({ method: "start" });
           return { sessionID };
         },
@@ -245,7 +245,7 @@ async function fixture(t) {
   });
   bridge = createBridge({
     client: sdk.client,
-    target: { serverID: "fixture-server", directory, model },
+    target: { serverID: "fixture-server", directory },
     settings: {},
     onChange(snapshot) {
       snapshots.push(snapshot);
@@ -269,7 +269,7 @@ async function fixture(t) {
           changed.emit("change");
         },
         spawn() {
-          child = spawn(binary, ["run", "--test-fixture"], {
+          child = spawn(binary, ["run", "--test-fixture", "--test-state-dir", dataDirectory], {
             stdio: "pipe",
             windowsHide: true,
             env: fixtureEnvironment(dataDirectory),

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
-import { posix, win32 } from "node:path";
+import { parseRuntimeConfig, type RuntimeConfig } from "../config.js";
 import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
@@ -8,9 +8,10 @@ import {
   type HostMessage,
   type LocalSettings,
 } from "../protocol.js";
+import { ensureEngine, RUNTIME_VERSION } from "./engine.js";
 
-// Installation layout is versioned independently of the server or project.
-export const RUNTIME_VERSION = "0.1.0";
+export { RUNTIME_VERSION };
+
 /** Do not inherit host/server tokens, provider keys, or arbitrary loader variables. */
 export function runtimeEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
@@ -34,42 +35,6 @@ export function runtimeEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS
     if (env[key] !== undefined) result[key] = env[key];
   return result;
 }
-export function runtimePath(
-  env: NodeJS.ProcessEnv = process.env,
-  platform = process.platform,
-  home = homedir(),
-): string {
-  const { join } = platform === "win32" ? win32 : posix;
-  const isAbsolute =
-    platform === "win32"
-      ? (value: string) => win32.isAbsolute(value) && win32.parse(value).root.length > 1
-      : posix.isAbsolute;
-  if (env.CONVERSE_BIN) {
-    if (!isAbsolute(env.CONVERSE_BIN))
-      throw new Error("CONVERSE_BIN must be an absolute local development executable path");
-    return env.CONVERSE_BIN;
-  }
-  const fromHome = (...parts: string[]) => {
-    if (!isAbsolute(home)) throw new Error("Converse runtime home must be absolute");
-    return join(home, ...parts);
-  };
-  const data =
-    platform === "darwin"
-      ? fromHome("Library", "Application Support")
-      : platform === "win32"
-        ? env.LOCALAPPDATA && isAbsolute(env.LOCALAPPDATA)
-          ? env.LOCALAPPDATA
-          : fromHome("AppData", "Local")
-        : env.XDG_DATA_HOME && isAbsolute(env.XDG_DATA_HOME)
-          ? env.XDG_DATA_HOME
-          : fromHome(".local", "share");
-  return join(
-    data,
-    "opencode-converse",
-    RUNTIME_VERSION,
-    platform === "win32" ? "opencode-converse.exe" : "opencode-converse",
-  );
-}
 
 export function localSettings(value: unknown): LocalSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -86,6 +51,16 @@ export function localSettings(value: unknown): LocalSettings {
       result[key] = item;
   }
   return result;
+}
+
+/** Inference tuning sent over stdio. The engine executable is never part of init. */
+export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings {
+  const config = parseRuntimeConfig(value ?? {});
+  return {
+    ...(config.asrThreads === undefined ? {} : { asrThreads: config.asrThreads }),
+    ...(config.ttsThreads === undefined ? {} : { ttsThreads: config.ttsThreads }),
+    ...(config.useGpu === undefined ? {} : { useGpu: config.useGpu }),
+  };
 }
 
 function exact(value: Record<string, unknown>, fields: string[]) {
@@ -140,6 +115,10 @@ export interface Runtime {
 }
 export interface RuntimeOptions {
   settings: LocalSettings;
+  /** Local package root that contains assets/bin for the current platform. */
+  packageRoot?: string;
+  /** Server-authoritative inference tuning. */
+  runtime?: RuntimeConfig;
   onMessage(message: EngineMessage): void;
   onError(error: Error): void;
   spawn?: () => ChildProcessWithoutNullStreams;
@@ -151,11 +130,21 @@ export interface RuntimeOptions {
 export function startRuntime(options: RuntimeOptions): Runtime {
   const child = options.spawn
     ? options.spawn()
-    : spawn(runtimePath(), ["run"], {
-        stdio: "pipe",
-        windowsHide: true,
-        env: runtimeEnvironment(),
-      });
+    : spawn(
+        ensureEngine({
+          env: process.env,
+          platform: process.platform,
+          arch: process.arch,
+          home: homedir(),
+          packageRoot: options.packageRoot,
+        }),
+        ["run"],
+        {
+          stdio: "pipe",
+          windowsHide: true,
+          env: runtimeEnvironment(),
+        },
+      );
   let pending: Buffer[] = [];
   let pendingBytes = 0;
   let hello = false;
@@ -290,7 +279,10 @@ export function startRuntime(options: RuntimeOptions): Runtime {
           send({
             type: "init",
             protocol: PROTOCOL_VERSION,
-            settings: localSettings(options.settings),
+            settings: {
+              ...localSettings(options.settings),
+              ...runtimeSettings(options.runtime),
+            },
           });
           resolveReady();
         } else {
@@ -325,7 +317,7 @@ export function startRuntime(options: RuntimeOptions): Runtime {
   child.on("error", (error) =>
     fail(
       new Error(
-        `Converse runtime unavailable: ${error.message}. Build from source with npm run engine:build, then set CONVERSE_BIN to the absolute native/target/release/opencode-converse executable path for local development. No prebuilt runtime is installed automatically.`,
+        `Converse runtime unavailable: ${error.message}. The packaged engine could not be started from the app state folder.`,
       ),
     ),
   );

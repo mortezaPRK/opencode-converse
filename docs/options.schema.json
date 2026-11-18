@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/mortezaPRK/opencode-converse/main/docs/options.schema.json",
+  "title": "OpenCode Converse plugin options",
+  "description": "Options for the OpenCode Converse plugin. The engine and speech-model locations are fixed under the app state folder and cannot be configured.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor schema pointer. Ignored by the runtime."
+    },
+    "supervisorModel": {
+      "$ref": "#/$defs/model",
+      "description": "Required before starting a conversation. Model used by the hidden Converse supervisor agent."
+    },
+    "workerModel": {
+      "$ref": "#/$defs/model",
+      "description": "Required before starting a conversation. Model used by the hidden Converse worker agent."
+    },
+    "asrThreads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256,
+      "default": 4,
+      "description": "Whisper inference thread count."
+    },
+    "ttsThreads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256,
+      "default": 4,
+      "description": "Piper inference thread count."
+    },
+    "useGpu": {
+      "type": "boolean",
+      "description": "Use GPU acceleration for Whisper when available. Defaults to true on macOS and false elsewhere."
+    }
+  },
+  "$defs": {
+    "model": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 512,
+          "pattern": "^[^/#]+/[^#]+(#[^#]+)?$",
+          "description": "provider/model or provider/model#variant"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["providerID", "id"],
+          "properties": {
+            "providerID": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "variant": { "type": "string", "minLength": 1, "maxLength": 256 }
+          }
+        }
+      ]
+    }
+  }
+}

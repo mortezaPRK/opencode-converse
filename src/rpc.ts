@@ -1,40 +1,18 @@
 import { Rpc } from "@opencode/plugin/rpc";
+import {
+  keys,
+  nonempty,
+  object,
+  parseModelRef,
+  parseRuntimeConfig,
+  type ModelRef,
+  type RuntimeConfig,
+} from "./config.js";
+
+export { keys, nonempty, object, parseModelRef };
+export type { ModelRef, RuntimeConfig };
 
 export const WORKER_UPDATE_MARKER = "converse.worker-update";
-
-export interface ModelRef {
-  readonly providerID: string;
-  readonly id: string;
-  readonly variant?: string;
-}
-
-export function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Expected an object");
-  }
-  return value as Record<string, unknown>;
-}
-
-export function keys(value: Record<string, unknown>, allowed: readonly string[]): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) throw new Error(`Unknown option: ${key}`);
-  }
-}
-
-export function nonempty(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error("Expected a nonempty string");
-  return value;
-}
-
-export function parseModelRef(value: unknown): ModelRef {
-  const input = object(value);
-  keys(input, ["providerID", "id", "variant"]);
-  return {
-    providerID: nonempty(input.providerID),
-    id: nonempty(input.id),
-    ...(input.variant === undefined ? {} : { variant: nonempty(input.variant) }),
-  };
-}
 
 /** Small Standard Schema validators keep the public RPC typed without runtime SDK imports. */
 function schema<T>(parse: (value: unknown) => T): {
@@ -47,7 +25,7 @@ function schema<T>(parse: (value: unknown) => T): {
 } {
   return {
     "~standard": {
-      version: 1 as const,
+      version: 1,
       vendor: "converse",
       validate(value: unknown) {
         try {
@@ -70,23 +48,28 @@ export const Converse = Rpc.define({
       input: schema<void>((value) => {
         if (value !== undefined && value !== null) throw new Error("hello takes no input");
       }),
-      output: schema<{ protocol: 1 }>((value) => {
+      output: schema<{ protocol: 1; packageRoot?: string }>((value) => {
         const input = object(value);
-        keys(input, ["protocol"]);
+        keys(input, ["protocol", "packageRoot"]);
         if (input.protocol !== 1) throw new Error("Unsupported Converse protocol");
-        return { protocol: 1 };
+        return {
+          protocol: 1,
+          ...(input.packageRoot === undefined ? {} : { packageRoot: nonempty(input.packageRoot) }),
+        };
       }),
     },
     start: {
-      input: schema<{ model?: ModelRef }>((value) => {
-        const input = object(value);
-        keys(input, ["model"]);
-        return input.model === undefined ? {} : { model: parseModelRef(input.model) };
+      input: schema<void>((value) => {
+        if (value !== undefined && value !== null && Object.keys(object(value)).length)
+          throw new Error("start takes no input; configure models through plugin options");
       }),
-      output: schema<{ sessionID: string }>((value) => {
+      output: schema<{ sessionID: string; runtime?: RuntimeConfig }>((value) => {
         const input = object(value);
-        keys(input, ["sessionID"]);
-        return { sessionID: nonempty(input.sessionID) };
+        keys(input, ["sessionID", "runtime"]);
+        return {
+          sessionID: nonempty(input.sessionID),
+          ...(input.runtime === undefined ? {} : { runtime: parseRuntimeConfig(input.runtime) }),
+        };
       }),
     },
     stop: {

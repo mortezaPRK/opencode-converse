@@ -10,9 +10,13 @@ export type VoiceStatus =
   | "speaking"
   | "muted";
 
+/** Local host preferences sent over stdio. Server credentials never appear here. */
 export interface LocalSettings {
   inputDevice?: string;
   outputDevice?: string;
+  asrThreads?: number;
+  ttsThreads?: number;
+  useGpu?: boolean;
 }
 
 export type EngineMessage =

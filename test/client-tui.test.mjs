@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createTui } from "../dist/tui.js";
 import { createBridge, isStoppedError } from "../dist/client/bridge.js";
 import { cleanupFixture } from "./client-cleanup-fixture.mjs";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function setup({ fixture } = {}) {
+function setup({ fixture, options } = {}) {
   const bridges = [];
   const errors = [];
   let commands;
@@ -18,6 +19,7 @@ function setup({ fixture } = {}) {
     client: fixture?.client ?? {},
     location: { directory: "/chosen" },
     storage: { store: () => [{}] },
+    options: options ?? {},
     theme: { text: { base: "white" } },
     keymap: {
       layer: (get) => {
@@ -255,4 +257,24 @@ test("TUI disposal keeps unknown native termination as a reported cleanup failur
       error.errors.some((failure) => /termination is unconfirmed/.test(failure.message)),
   );
   fixture.processes[0].emit("close", null, "SIGKILL");
+});
+
+test("TUI hands configured inference tuning to the bridge", async () => {
+  const s = setup({ options: { asrThreads: 2, useGpu: false } });
+  await s.run("start");
+  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2, useGpu: false });
+  assert.equal(
+    `${s.bridges[0].options.packageRoot}/`,
+    fileURLToPath(new URL("../", import.meta.url)),
+  );
+  s.release();
+  await s.cleanup();
+});
+
+test("TUI refuses invalid inference tuning before starting", async () => {
+  const s = setup({ options: { asrThreads: 0 } });
+  await s.run("start");
+  assert.equal(s.bridges.length, 0);
+  assert.match(s.errors.at(-1)?.message ?? "", /between 1 and 256/);
+  await s.cleanup();
 });
