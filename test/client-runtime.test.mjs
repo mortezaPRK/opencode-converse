@@ -504,7 +504,7 @@ test("state folder and engine path are fixed per platform", () => {
 test("package engine directory is platform and architecture specific", () => {
   assert.equal(
     packagedEngineDirectory({ packageRoot: "/pkg", platform: "darwin", arch: "arm64" }),
-    posix.join("/pkg", "assets", "bin", "darwin-arm64"),
+    join("/pkg", "assets", "bin", "darwin-arm64"),
   );
 });
 
