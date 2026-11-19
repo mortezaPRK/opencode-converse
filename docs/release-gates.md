@@ -59,8 +59,16 @@ architectures are not implied by operating-system support.
 - Check the Interrupted note in the transcript against what was actually audible on
   a real device: the heard text must match what was played, within a word or two,
   and must never be added to agent context.
-- Measure false prompts from the assistant's own voice on speakers. Require
-  headphones unless speaker use has passed an explicit echo/self-trigger test.
+- **Echo/self-trigger gate (still open).** Echo cancellation (`echoCancellation: "on"`,
+  WebRTC AEC3) has only been measured offline against simulated echo
+  (`aec_quality`). On real laptop speakers, at several volumes and rooms, and with
+  Bluetooth and USB devices: count false interruptions of a long reply (must be zero
+  over at least 10 minutes of assistant speech), confirm you can interrupt with a
+  normal voice within about 0.3 s, check that the first words of the interruption are
+  transcribed, and that a quiet user over loud speech is not clipped by the
+  canceller. Until this passes, document headphones as the safe choice and keep
+  `echoCancellation: "off"` available. Also test with a different output and input
+  device clock (USB mic, Bluetooth speaker) for drift.
 - Test default-device changes, Bluetooth devices, and microphone removal.
 
 ## Distribution and compliance

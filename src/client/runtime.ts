@@ -61,6 +61,7 @@ export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings
     ...(config.ttsThreads === undefined ? {} : { ttsThreads: config.ttsThreads }),
     ...(config.endpointing === undefined ? {} : { endpointing: config.endpointing }),
     ...(config.acknowledgement === undefined ? {} : { acknowledgement: config.acknowledgement }),
+    ...(config.echoCancellation === undefined ? {} : { echoCancellation: config.echoCancellation }),
   };
 }
 

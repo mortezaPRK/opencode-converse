@@ -102,6 +102,14 @@ test("runtime sends endpointing over init", async () => {
   await runtime.stop();
 });
 
+test("runtime sends echoCancellation over init", async () => {
+  const { proc, runtime } = setup({ runtime: { echoCancellation: "off" } });
+  proc.frame({ type: "hello", protocol: 1 });
+  await runtime.ready;
+  assert.equal(proc.frames[0].settings.echoCancellation, "off");
+  await runtime.stop();
+});
+
 test("runtime sends acknowledgement over init", async () => {
   const { proc, runtime } = setup({ runtime: { acknowledgement: "off" } });
   proc.frame({ type: "hello", protocol: 1 });

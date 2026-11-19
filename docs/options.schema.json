@@ -41,6 +41,11 @@
       "enum": ["auto", "off"],
       "default": "auto",
       "description": "auto: if the reply has not started speaking about 0.6 s after your turn is sent, say one short neutral cue (\"Okay.\", \"On it.\", \"Let me check.\") that claims nothing. off: stay silent until the reply begins."
+    },
+    "echoCancellation": {
+      "enum": ["on", "off"],
+      "default": "on",
+      "description": "on: subtract the engine's own playback from the microphone (WebRTC AEC3) so you can interrupt on speakers; barge-in then needs far less confirmation. off: no echo cancellation and a conservative barge-in guard (about 0.5 s of clear speech); use headphones."
     }
   },
   "$defs": {

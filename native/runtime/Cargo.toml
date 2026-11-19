@@ -31,3 +31,7 @@ required-features = ["native-audio"]
 [[example]]
 name = "asr_quality"
 required-features = ["native-audio"]
+
+[[example]]
+name = "aec_quality"
+required-features = ["native-audio"]

@@ -869,6 +869,14 @@ export function createBridge(options: BridgeOptions) {
         { ...request, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]) },
       );
     },
+    /** Stop following a session; the session and its running work are untouched. */
+    async detach(targetSessionID: string) {
+      if (closed || !sessionID || !runtimeReady) throw new Error("Converse is not running");
+      await rpc.detach(
+        { supervisorID: sessionID, sessionID: targetSessionID },
+        { ...request, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]) },
+      );
+    },
     mute() {
       if (status !== "muted") newActivity();
       send({ type: "mute", on: status !== "muted" });

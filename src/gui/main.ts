@@ -157,6 +157,13 @@ export function createMain(
           await bridge.attach(input.sessionID);
         });
       },
+      detach(input, caller) {
+        return serialize(async () => {
+          checkOwner(caller.window);
+          if (!bridge) throw new Error("Converse is not running");
+          await bridge.detach(input.sessionID);
+        });
+      },
       mute(_input, caller) {
         return serialize(async () => {
           checkOwner(caller.window);

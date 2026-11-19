@@ -93,6 +93,7 @@ export default Plugin.define({
           start: async () => supervisor.start(),
           stop: async (input) => supervisor.stop(input.sessionID),
           attach: async (input) => supervisor.attachForUser(input.supervisorID, input.sessionID),
+          detach: async (input) => supervisor.detachForUser(input.supervisorID, input.sessionID),
         }),
       );
     } catch (error) {
