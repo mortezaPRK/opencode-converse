@@ -47,6 +47,11 @@
       "default": "on",
       "description": "on: subtract the engine's own playback from the microphone (WebRTC AEC3) so you can interrupt on speakers; barge-in then needs far less confirmation. off: no echo cancellation and a conservative barge-in guard (about 0.5 s of clear speech); use headphones."
     },
+    "agentChat": {
+      "enum": ["on", "off"],
+      "default": "on",
+      "description": "on: with two or more agents, an agent whose reply starts (or ends, after a comma) with another agent's name hands the floor to that agent, spoken in its own voice. Bounded per user turn: at most 4 agent turns, 90 seconds, and 2 round trips between the same pair; speaking ends it. off: agents only answer you."
+    },
     "agents": {
       "type": "array",
       "minItems": 1,

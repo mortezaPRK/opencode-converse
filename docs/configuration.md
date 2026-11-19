@@ -143,7 +143,42 @@ conversation.
 **One voice at a time.** The engine keeps a single floor. If another agent's reply
 arrives while one is speaking, it is queued (at most 8 items and 64 KiB) and spoken
 afterwards in its own voice; speaking over them cancels the active and the queued
-speech. Agents do not yet talk to each other.
+speech.
+
+### Agents talking to each other
+
+With two or more agents and `agentChat` `"on"` (the default; `"off"` disables it), an
+agent whose completed reply starts with another agent's name and a comma ("Grace, can
+you check that?"), or ends with ", Grace", hands the floor over. The reply is spoken
+in the speaker's voice and delivered to the addressee's own session as
+`[Ada → Grace]: can you check that?`, followed by the same bounded digest. The
+addressee's reply is then spoken in its voice, and may hand over again.
+
+The engine enforces the budget, never the model. Per user turn:
+
+- at most **4 agent turns** in a row (the one answering you counts as the first);
+- at most **90 seconds** from when you finished speaking;
+- no more than **2 round trips** between the same two agents.
+
+When a hand-off is refused for one of these reasons, the transcript shows a short
+"Agent chat ended" note and control returns to you. A reply that names nobody, names
+itself, or names someone who is not on the roster ends the chain silently. Your
+speech at any moment cancels what is being spoken or queued and ends the chain;
+muting does too. Every new thing you say starts a fresh budget. Worker announcements
+never start a chain. Each hand-off is a full model turn, so a chain costs up to four
+turns; set `agentChat: "off"` to keep every agent answering only you.
+
+### Followed sessions: one prompter at a time
+
+Only one agent prompts a given followed session: the agent that attached or started
+it. The others get a clear refusal that names the holder when they try to prompt,
+interrupt or attach it, and cannot take it from each other. Only **you** can
+reassign it: say "Grace, take over the build session". Grace's `converse_take_over_session`
+tool then works only if that turn is your own speech, as reported by your local
+client (not a relayed agent line, and not a worker update). Worker announcements for
+a followed session are spoken in the holder's voice. The lock is in memory for the
+conversation, and the OpenCode server does not enforce it: another client can still
+prompt the session.
 
 ## Speech model inventory
 

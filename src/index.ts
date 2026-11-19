@@ -92,11 +92,12 @@ export default Plugin.define({
       );
       registrations.push(
         await ctx.rpc.register(Converse, {
-          hello: async () => ({ protocol: 2 as const, packageRoot: PACKAGE_ROOT }),
+          hello: async () => ({ protocol: 3 as const, packageRoot: PACKAGE_ROOT }),
           start: async (input) => supervisor.start(input?.participant),
           stop: async (input) => supervisor.stop(input.sessionID),
           attach: async (input) => supervisor.attachForUser(input.supervisorID, input.sessionID),
           detach: async (input) => supervisor.detachForUser(input.supervisorID, input.sessionID),
+          turn: async (input) => supervisor.setTurnOrigin(input.supervisorID, input.origin),
         }),
       );
     } catch (error) {

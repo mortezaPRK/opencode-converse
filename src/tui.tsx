@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { Plugin } from "@opencode/plugin/tui";
-import { speakerSuffix } from "./roster-view.js";
+import { chainLine, speakerSuffix } from "./roster-view.js";
 import { createBridge, isStoppedError, type Snapshot } from "./client/bridge.js";
 import { localSettings } from "./client/runtime.js";
 import { parseRuntimeConfig } from "./config.js";
@@ -198,6 +198,9 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
               </text>
             </box>
             <text fg={ctx.theme.text.muted}>{view().detail}</text>
+            <Show when={chainLine(state())}>
+              <text fg={ctx.theme.text.muted}>{chainLine(state())}</text>
+            </Show>
           </box>
         </Show>
       );

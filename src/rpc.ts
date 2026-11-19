@@ -48,12 +48,12 @@ export const Converse = Rpc.define({
       input: schema<void>((value) => {
         if (value !== undefined && value !== null) throw new Error("hello takes no input");
       }),
-      output: schema<{ protocol: 2; packageRoot?: string }>((value) => {
+      output: schema<{ protocol: 3; packageRoot?: string }>((value) => {
         const input = object(value);
         keys(input, ["protocol", "packageRoot"]);
-        if (input.protocol !== 2) throw new Error("Unsupported Converse protocol");
+        if (input.protocol !== 3) throw new Error("Unsupported Converse protocol");
         return {
-          protocol: 2,
+          protocol: 3,
           ...(input.packageRoot === undefined ? {} : { packageRoot: nonempty(input.packageRoot) }),
         };
       }),
@@ -97,6 +97,18 @@ export const Converse = Rpc.define({
           supervisorID: nonempty(input.supervisorID),
           sessionID: nonempty(input.sessionID),
         };
+      }),
+    },
+    turn: {
+      output: schema<void>((value) => {
+        if (value !== undefined && value !== null) throw new Error("turn returns no value");
+      }),
+      input: schema<{ supervisorID: string; origin: "user" | "agent" | "none" }>((value) => {
+        const input = object(value);
+        keys(input, ["supervisorID", "origin"]);
+        if (input.origin !== "user" && input.origin !== "agent" && input.origin !== "none")
+          throw new Error('origin must be "user", "agent" or "none"');
+        return { supervisorID: nonempty(input.supervisorID), origin: input.origin };
       }),
     },
     detach: {

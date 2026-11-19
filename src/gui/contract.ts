@@ -20,10 +20,11 @@ export const ConverseDesktop = Ipc.define({
     ),
     transcript: Schema.Array(
       Schema.Struct({
-        role: Schema.Literals(["user", "assistant"]),
+        role: Schema.Literals(["user", "assistant", "note"]),
         text: Schema.String,
         agent: Schema.optional(Schema.Number),
         speaker: Schema.optional(Schema.String),
+        to: Schema.optional(Schema.String),
       }),
     ),
     participants: Schema.Array(

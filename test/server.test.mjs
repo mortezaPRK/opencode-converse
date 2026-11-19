@@ -1774,12 +1774,25 @@ test("server options validate models, runtime paths, and reject unknown fields",
 
 test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.equal(Converse.id, "converse");
-  assert.deepEqual(Object.keys(Converse.methods), ["hello", "start", "stop", "attach", "detach"]);
-  const hello = Converse.methods.hello.output["~standard"];
-  assert.deepEqual(await hello.validate({ protocol: 2, packageRoot: "/pkg" }), {
-    value: { protocol: 2, packageRoot: "/pkg" },
+  assert.deepEqual(Object.keys(Converse.methods), [
+    "hello",
+    "start",
+    "stop",
+    "attach",
+    "turn",
+    "detach",
+  ]);
+  const turn = Converse.methods.turn.input["~standard"];
+  assert.deepEqual(await turn.validate({ supervisorID: "s", origin: "user" }), {
+    value: { supervisorID: "s", origin: "user" },
   });
-  assert.ok((await hello.validate({ protocol: 2, extra: true })).issues);
+  assert.ok((await turn.validate({ supervisorID: "s", origin: "root" })).issues);
+  assert.ok((await turn.validate({ supervisorID: "s", origin: "user", extra: 1 })).issues);
+  const hello = Converse.methods.hello.output["~standard"];
+  assert.deepEqual(await hello.validate({ protocol: 3, packageRoot: "/pkg" }), {
+    value: { protocol: 3, packageRoot: "/pkg" },
+  });
+  assert.ok((await hello.validate({ protocol: 3, extra: true })).issues);
   const input = Converse.methods.start.input["~standard"];
   assert.deepEqual(await input.validate(undefined), { value: undefined });
   assert.ok((await input.validate({ model: { providerID: "p", id: "m" } })).issues);
@@ -1800,6 +1813,7 @@ test("tools expose no permission decision or generic session executor", () => {
     "list_agents",
     "attach_session",
     "detach_session",
+    "take_over_session",
     "session_status",
     "start_session",
     "send_message",
@@ -2768,7 +2782,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     { action: "*", resource: "*", effect: "allow" },
     { action: "converse", resource: "*", effect: "deny" },
   ]);
-  assert.equal(registeredTools.length, 9);
+  assert.equal(registeredTools.length, 10);
   for (const tool of registeredTools) {
     assert.deepEqual(tool.options, {
       namespace: "converse",
@@ -2778,7 +2792,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     await assert.rejects(tool.execute({}, { sessionID: "forged-supervisor" }), /owning Converse/);
   }
   const hello = await rpc.hello();
-  assert.equal(hello.protocol, 2);
+  assert.equal(hello.protocol, 3);
   assert.ok(hello.packageRoot);
   const { sessionID, runtime } = await rpc.start();
   assert.deepEqual(runtime, {});
@@ -3119,7 +3133,7 @@ test("each configured agent gets its own supervisor session with its own OpenCod
       { sessionID: registrations[0], text: "hi" },
       second.sessionID,
     ),
-    /not followed by this conversation/,
+    /Ada holds that session/,
   );
   await f.service.stop(first.sessionID);
   await f.service.stop(second.sessionID);
@@ -3218,4 +3232,66 @@ test("context hook gives an owned custom-agent session the tools and its own ros
   assert.deepEqual(Object.keys(stranger.tools).sort(), ["other_tool", "shell"]);
   assert.deepEqual(stranger.system, []);
   await cleanup();
+});
+
+test("only one agent prompts a followed session and only the user can reassign it", async () => {
+  const f = crewFixture([{ name: "Ada" }, { name: "Grace" }]);
+  const ada = (await f.service.start()).sessionID;
+  const grace = (await f.service.start("a2")).sessionID;
+  await f.service.execute("start_session", { task: "Build it" }, ada);
+  const [worker] = followedIDs(f);
+  const send = (who) => f.service.execute("send_message", { sessionID: worker, text: "go" }, who);
+  const takeOver = (who) => f.service.execute("take_over_session", { sessionID: worker }, who);
+
+  await send(ada);
+  for (const call of [
+    () => send(grace),
+    () => f.service.execute("interrupt_session", { sessionID: worker }, grace),
+    () => f.service.execute("attach_session", { sessionID: worker }, grace),
+  ])
+    await assert.rejects(call, /Ada (holds|already follows) that session[\s\S]*Only the user/);
+
+  // No authority yet, an agent's relayed line, and a cleared turn all fail: agents cannot steal.
+  await assert.rejects(takeOver(grace), /Only the user can reassign/);
+  await f.service.setTurnOrigin(grace, "agent");
+  await assert.rejects(takeOver(grace), /Only the user can reassign/);
+  await f.service.setTurnOrigin(grace, "user");
+  await f.service.setTurnOrigin(grace, "none");
+  await assert.rejects(takeOver(grace), /Only the user can reassign/);
+  await send(ada);
+
+  // The user's own turn addressed to Grace moves the lock.
+  await f.service.setTurnOrigin(grace, "user");
+  assert.match(await takeOver(grace), /You now hold that session; Ada no longer prompts it/);
+  assert.match(await takeOver(grace), /already hold/);
+  await send(grace);
+  await assert.rejects(send(ada), /Grace holds that session/);
+  // The previous holder's authority does not let it take it back without the user's turn.
+  await assert.rejects(takeOver(ada), /Only the user can reassign/);
+  await f.service.setTurnOrigin(ada, "user");
+  assert.match(await takeOver(ada), /You now hold/);
+  await send(ada);
+});
+
+test("take over refuses sessions nobody follows and an unauthenticated origin grant", async () => {
+  const f = crewFixture([{ name: "Ada" }, { name: "Grace" }]);
+  const ada = (await f.service.start()).sessionID;
+  await f.service.setTurnOrigin(ada, "user");
+  await assert.rejects(f.service.execute("take_over_session", { sessionID: "missing" }, ada), /./);
+  await assert.rejects(f.service.setTurnOrigin("not-a-supervisor", "user"), /owning Converse/);
+});
+
+test("agent prompts explain hand-offs, the prompter lock, and chat off", async () => {
+  const on = crewFixture([{ name: "Ada" }, { name: "Grace" }]);
+  const a = (await on.service.start()).sessionID;
+  const text = await on.service.systemPrompt(a);
+  assert.match(text, /begin your spoken reply with their name/);
+  assert.match(text, /\[Name → Ada\]/);
+  assert.match(text, /converse_take_over_session/);
+  const off = crewFixture([{ name: "Ada" }, { name: "Grace" }]);
+  off.service.options.runtime.agentChat = "off";
+  const b = (await off.service.start()).sessionID;
+  const quiet = await off.service.systemPrompt(b);
+  assert.doesNotMatch(quiet, /begin your spoken reply with their name/);
+  assert.match(quiet, /Do not address other agents/);
 });

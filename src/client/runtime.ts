@@ -62,6 +62,7 @@ export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings
     ...(config.endpointing === undefined ? {} : { endpointing: config.endpointing }),
     ...(config.acknowledgement === undefined ? {} : { acknowledgement: config.acknowledgement }),
     ...(config.echoCancellation === undefined ? {} : { echoCancellation: config.echoCancellation }),
+    ...(config.agentChat === undefined ? {} : { agentChat: config.agentChat }),
     participants: resolveRoster(config.agents),
   };
 }
@@ -97,12 +98,20 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     return v as EngineMessage;
   if (
     v.type === "prompt" &&
-    exact(v, ["type", "turn", "speaker", "addressed", "text"]) &&
+    exactOptional(v, ["type", "turn", "speaker", "addressed", "text"], ["from"]) &&
     turn(v.turn) &&
     speaker(v.speaker) &&
+    (v.from === undefined || speaker(v.from)) &&
     typeof v.addressed === "boolean" &&
     text(v.text) &&
     (v.text as string).trim()
+  )
+    return v as EngineMessage;
+  if (
+    v.type === "chain_end" &&
+    exact(v, ["type", "turn", "reason"]) &&
+    turn(v.turn) &&
+    (v.reason === "turns" || v.reason === "time" || v.reason === "ping_pong")
   )
     return v as EngineMessage;
   if (
@@ -128,7 +137,7 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     return v as EngineMessage;
   throw new Error(
     v.type === "hello"
-      ? "Converse protocol version mismatch (expected 2)"
+      ? "Converse protocol version mismatch (expected 3)"
       : "Invalid Converse frame",
   );
 }

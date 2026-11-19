@@ -1,7 +1,7 @@
 //! Mirror of the fixed src/protocol.ts contract. Never accept executable/model paths.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 262_144;
 pub const MAX_PARTICIPANTS: usize = 4;
@@ -29,6 +29,16 @@ pub struct Settings {
     /// The fixed roster for this conversation. Absent means one agent speaking the default voice.
     #[serde(default)]
     pub participants: Option<Vec<Participant>>,
+    /// Whether an agent's reply that addresses another agent is relayed to that agent.
+    #[serde(default)]
+    pub agent_chat: Option<AgentChatSetting>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentChatSetting {
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -76,6 +86,10 @@ pub enum EchoCancellationSetting {
 }
 
 impl Settings {
+    /// Agents may talk to each other unless the host explicitly turned it off.
+    pub fn agent_chat_enabled(&self) -> bool {
+        self.agent_chat != Some(AgentChatSetting::Off)
+    }
     /// Echo cancellation is on unless the host explicitly turned it off.
     pub fn echo_cancellation_enabled(&self) -> bool {
         self.echo_cancellation != Some(EchoCancellationSetting::Off)
@@ -159,7 +173,7 @@ impl Host {
         match self {
             Self::Init { protocol, settings } => {
                 if *protocol != VERSION {
-                    return Err("Unsupported protocol version; expected 2");
+                    return Err("Unsupported protocol version; expected 3");
                 }
                 for device in [&settings.input_device, &settings.output_device]
                     .into_iter()
@@ -273,6 +287,16 @@ pub enum Engine {
         speaker: String,
         addressed: bool,
         text: String,
+        /// Set when another agent's reply addressed this participant: the relaying speaker.
+        /// Absent for prompts that come from the user.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+    },
+    /// An agent-to-agent hand-off was refused by the chain budget. `reason` is `turns`,
+    /// `time` or `ping_pong`. Sent once per refused hand-off; never for a natural end.
+    ChainEnd {
+        turn: u64,
+        reason: &'static str,
     },
     /// `played_ms`/`generated_ms` describe the reply being cut off: audio the output
     /// device actually consumed versus audio generated for it. Absent when no native
@@ -333,7 +357,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":2,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
+            r#"{"type":"init","protocol":3,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
@@ -350,22 +374,22 @@ mod tests {
         assert!(Settings::default().echo_cancellation_enabled());
         for bad in ["\"loud\"", "1", "true"] {
             let value =
-                format!(r#"{{"type":"init","protocol":2,"settings":{{"acknowledgement":{bad}}}}}"#);
+                format!(r#"{{"type":"init","protocol":3,"settings":{{"acknowledgement":{bad}}}}}"#);
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         for bad in ["\"auto\"", "1", "true"] {
             let value = format!(
-                r#"{{"type":"init","protocol":2,"settings":{{"echoCancellation":{bad}}}}}"#
+                r#"{{"type":"init","protocol":3,"settings":{{"echoCancellation":{bad}}}}}"#
             );
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         assert!(serde_json::from_str::<Host>(
-            r#"{"type":"init","protocol":2,"settings":{"endpointing":"fast"}}"#
+            r#"{"type":"init","protocol":3,"settings":{"endpointing":"fast"}}"#
         )
         .is_err());
         for value in [
-            r#"{"type":"init","protocol":2,"settings":{"asrThreads":0}}"#,
-            r#"{"type":"init","protocol":2,"settings":{"ttsThreads":257}}"#,
+            r#"{"type":"init","protocol":3,"settings":{"asrThreads":0}}"#,
+            r#"{"type":"init","protocol":3,"settings":{"ttsThreads":257}}"#,
         ] {
             let message: Host = serde_json::from_str(value).unwrap();
             assert!(message.validate().is_err(), "{value}");
@@ -401,7 +425,7 @@ mod tests {
     fn strict_contract() {
         for s in [
             r#"{"type":"shutdown","extra":1}"#,
-            r#"{"type":"init","protocol":2,"settings":{"voice":"x"}}"#,
+            r#"{"type":"init","protocol":3,"settings":{"voice":"x"}}"#,
             r#"{"type":"unknown"}"#,
             r#"{"type":"mute","on":1}"#,
             r#"{"type":"pause","on":1}"#,
@@ -417,7 +441,7 @@ mod tests {
     fn participants_are_validated_and_speakers_are_required() {
         let init = |participants: &str| -> Result<(), &'static str> {
             let message: Host = serde_json::from_str(&format!(
-                r#"{{"type":"init","protocol":2,"settings":{{"participants":{participants}}}}}"#
+                r#"{{"type":"init","protocol":3,"settings":{{"participants":{participants}}}}}"#
             ))
             .map_err(|_| "parse")?;
             message.validate()
@@ -471,5 +495,21 @@ mod tests {
         )
         .unwrap();
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn agent_chat_is_on_unless_turned_off_and_rejects_other_values() {
+        let parse = |settings: &str| {
+            serde_json::from_str::<Host>(&format!(
+                r#"{{"type":"init","protocol":3,"settings":{settings}}}"#
+            ))
+        };
+        let on = |settings: &str| match parse(settings).unwrap() {
+            Host::Init { settings, .. } => settings.agent_chat_enabled(),
+            _ => unreachable!(),
+        };
+        assert!(on("{}") && on(r#"{"agentChat":"on"}"#));
+        assert!(!on(r#"{"agentChat":"off"}"#));
+        assert!(parse(r#"{"agentChat":"maybe"}"#).is_err());
     }
 }

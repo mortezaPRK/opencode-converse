@@ -27,6 +27,10 @@ The current SDK target is OpenCode **2.3.0**.
   its own voice and its own OpenCode session; you address one by name, and with no
   name the first agent answers. Rust owns addressing, the speaking floor, and the
   per-speaker voice; the plugin only routes each prompt to the addressee's session.
+- With two or more agents they can talk to each other (`agentChat`, on by default),
+  bounded by the engine: at most 4 agent turns, 90 seconds and 2 round trips per
+  thing you say; speaking ends it. Only one agent prompts a followed session, and
+  only you can reassign it ("Grace, take over the build session").
 - English speech is the initial scope. Permission requests are announced, but
   approvals happen in OpenCode's normal interface.
 - The microphone starts only on an explicit command. Stopping a conversation
@@ -171,10 +175,17 @@ The engine and speech-model locations are fixed under the app state folder.
 There is no engine, data, or model path option and no `CONVERSE_BIN` override.
 The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
-versions. `asrThreads`, `ttsThreads`, `endpointing`, `acknowledgement`, and `echoCancellation` are the only runtime tuning
+versions. `asrThreads`, `ttsThreads`, `endpointing`, `acknowledgement`, `echoCancellation`, and `agentChat` are the only runtime tuning
 options, plus `agents` (see [`docs/configuration.md`](docs/configuration.md#agents)),
 for example `"agents": [{ "name": "Ada", "voice": "zoey" }, { "name": "Grace", "voice": "easton" }]`.
 Say "Ada, …" or "…, Grace" to address one; unnamed speech goes to the first agent.
+`agentChat` (`on` default, or `off`) lets agents hand the floor to each other.
+
+Try it: with the two agents above, say "Ada, ask Grace what she thinks of the plan."
+Ada answers "Grace, what do you think of the plan?" in her voice, then Grace replies
+in hers; say anything to cut in and the chat stops. To move a followed session, say
+"Grace, take over the build session". Set `"agentChat": "off"` if you want every
+agent to answer only you.
 OpenCode owns provider credentials; they are never passed to the Rust
 process. Device preferences stay in host storage.
 

@@ -18,6 +18,7 @@ export interface RuntimeConfig {
   readonly endpointing?: Endpointing;
   readonly acknowledgement?: Acknowledgement;
   readonly echoCancellation?: EchoCancellation;
+  readonly agentChat?: AgentChat;
 }
 
 /** Voices shipped with the engine, in assignment order for agents that name none. */
@@ -69,12 +70,15 @@ export const PLUGIN_OPTION_KEYS = [
   "endpointing",
   "acknowledgement",
   "echoCancellation",
+  "agentChat",
   "agents",
 ] as const;
 
 export type Endpointing = "responsive" | "patient";
 export type Acknowledgement = "auto" | "off";
 export type EchoCancellation = "on" | "off";
+/** Whether named agents may hand the floor to each other (bounded; user speech ends it). */
+export type AgentChat = "on" | "off";
 
 const MAX_THREADS = 256;
 
@@ -126,6 +130,12 @@ function acknowledgementOption(value: unknown): Acknowledgement | undefined {
 function echoCancellationOption(value: unknown): EchoCancellation | undefined {
   if (value === undefined || value === null) return undefined;
   if (value !== "on" && value !== "off") throw new Error('echoCancellation must be "on" or "off"');
+  return value;
+}
+
+function agentChatOption(value: unknown): AgentChat | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value !== "on" && value !== "off") throw new Error('agentChat must be "on" or "off"');
   return value;
 }
 
@@ -219,6 +229,7 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const acknowledgement = acknowledgementOption(input.acknowledgement);
   const echoCancellation = echoCancellationOption(input.echoCancellation);
   const agents = agentsOption(input.agents);
+  const agentChat = agentChatOption(input.agentChat);
   return {
     ...(agents === undefined ? {} : { agents }),
     ...(asrThreads === undefined ? {} : { asrThreads }),
@@ -226,6 +237,7 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
     ...(endpointing === undefined ? {} : { endpointing }),
     ...(acknowledgement === undefined ? {} : { acknowledgement }),
     ...(echoCancellation === undefined ? {} : { echoCancellation }),
+    ...(agentChat === undefined ? {} : { agentChat }),
   };
 }
 
