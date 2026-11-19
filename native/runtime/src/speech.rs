@@ -1,5 +1,10 @@
 //! One incremental cleanup/chunking stage, shared by native and explicit test mode.
 //! Markdown/code is not read verbatim. State survives arbitrary delta boundaries.
+
+// Keep complete sentences when possible, without allowing unbounded synthesis.
+const MAX_CHUNK_BYTES: usize = 320;
+const MAX_CHUNK_WORDS: usize = 40;
+
 pub struct Speech {
     raw: String,
     pending: String,
@@ -186,52 +191,79 @@ impl Speech {
         let mut processed = 0;
         loop {
             let pending = &self.pending[processed..];
-            // Fixed bound protects synthesis and its generated audio buffer.
+            // Decide forced cuts from a fixed prefix, not the size of a provider
+            // delta. Otherwise batch and streamed replies acquire different prosody.
+            let mut words = 0;
+            let mut in_word = false;
+            let word_bound = pending
+                .char_indices()
+                .take_while(|(i, _)| *i <= MAX_CHUNK_BYTES)
+                .find_map(|(i, c)| {
+                    if c.is_whitespace() {
+                        if in_word {
+                            words += 1;
+                            in_word = false;
+                        }
+                        (words == MAX_CHUNK_WORDS).then_some(i)
+                    } else {
+                        in_word = true;
+                        None
+                    }
+                });
+            let horizon = word_bound.unwrap_or(MAX_CHUNK_BYTES);
             let punctuation = pending
                 .char_indices()
-                .take_while(|(i, _)| *i < 320)
+                .take_while(|(i, c)| i + c.len_utf8() <= horizon)
                 .find_map(|(i, c)| {
                     if matches!(c, '。' | '！' | '？') {
                         Some(i + c.len_utf8())
                     } else if matches!(c, '.' | '!' | '?')
-                        && pending[..i].split_whitespace().count() >= 3
+                        && (c != '.' || !continuation_period(pending, i))
                     {
                         ascii_sentence_end(pending, i + c.len_utf8(), final_)
+                            .filter(|end| *end <= horizon)
                     } else {
                         None
                     }
                 });
-            let word_bound = pending
-                .char_indices()
-                .take_while(|(i, _)| *i <= 320)
-                .filter(|(_, c)| c.is_whitespace())
-                .nth(23)
-                .map(|(i, _)| i);
-            let char_bound = pending
-                .char_indices()
-                .take_while(|(i, _)| *i <= 320)
-                .filter(|(i, c)| *i > 0 && c.is_whitespace())
-                .last()
-                .map(|(i, _)| i);
-            let bound = if pending.len() > 320 {
-                char_bound.or_else(|| {
-                    // A leading space is not a usable boundary: draining ..0
-                    // cannot make progress. Unbroken tokens still need a hard,
-                    // positive byte bound that never splits a UTF-8 character.
+            let forced = word_bound.is_some() || pending.len() > MAX_CHUNK_BYTES;
+            let cut = punctuation.or_else(|| {
+                if !forced {
+                    return None;
+                }
+                // Prefer a complete clause over an arbitrary word splice. Wait
+                // until the safety horizon before selecting it, so commas in short
+                // sentences keep their model-generated internal timing.
+                let clause = pending
+                    .char_indices()
+                    .take_while(|(i, c)| i + c.len_utf8() <= horizon)
+                    .filter(|(_, c)| matches!(c, ',' | ';' | ':' | '—' | '–'))
+                    .filter_map(|(i, c)| {
+                        let end = i + c.len_utf8();
+                        pending[end..]
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_whitespace)
+                            .then_some(end)
+                    })
+                    .last();
+                clause.or(word_bound).or_else(|| {
                     pending
                         .char_indices()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .take_while(|end| *end <= 320)
+                        .take_while(|(i, _)| *i <= horizon)
+                        .filter(|(i, c)| *i > 0 && c.is_whitespace())
+                        .map(|(i, _)| i)
                         .last()
+                        .or_else(|| {
+                            // Unbroken tokens still need a positive UTF-8-safe cut.
+                            pending
+                                .char_indices()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .take_while(|end| *end <= horizon)
+                                .last()
+                        })
                 })
-            } else {
-                None
-            };
-            let cut = [punctuation, word_bound, bound]
-                .into_iter()
-                .flatten()
-                .filter(|cut| *cut > 0 && pending.is_char_boundary(*cut))
-                .min();
+            });
             let Some(cut) = cut else {
                 break;
             };
@@ -264,6 +296,29 @@ fn complete_lines(raw: &mut String, mut line: impl FnMut(&str)) {
     if processed > 0 {
         raw.drain(..processed);
     }
+}
+
+/// Conservative English continuation forms. Only inspect the prefix: a decision
+/// must not change when another provider delta arrives after the whitespace.
+fn continuation_period(text: &str, at: usize) -> bool {
+    let token = text[..at]
+        .split_whitespace()
+        .next_back()
+        .unwrap_or("")
+        .trim_start_matches(['(', '[', '{', '"', '\'', '“', '‘']);
+    let lower = token.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "st" | "vs" | "e.g" | "i.e"
+    ) {
+        return true;
+    }
+    // Initials and dotted acronyms (J. Smith, U.S. team), not decimal/version
+    // numbers. Ambiguous acronyms at sentence end remain together until final
+    // flush or a later unambiguous boundary.
+    token
+        .split('.')
+        .all(|part| part.len() == 1 && part.as_bytes()[0].is_ascii_uppercase())
 }
 
 fn ascii_sentence_end(text: &str, mut end: usize, final_: bool) -> Option<usize> {
@@ -537,6 +592,108 @@ mod tests {
         }
         out.extend(speech.push("", true));
         assert_eq!(out.join(" "), "Hello world. Read the guide.");
+    }
+    #[test]
+    fn complete_sentences_survive_the_old_word_cap_at_every_split() {
+        let text = format!("{}finished. Next sentence.", "word ".repeat(30));
+        let expected = vec![
+            format!("{}finished.", "word ".repeat(30)),
+            "Next sentence.".into(),
+        ];
+        for split in 0..=text.len() {
+            let mut speech = Speech::default();
+            let mut chunks = speech.push(&text[..split], false);
+            chunks.extend(speech.push(&text[split..], false));
+            chunks.extend(speech.push("", true));
+            assert_eq!(chunks, expected, "split {split}");
+        }
+    }
+    #[test]
+    fn forced_chunks_prefer_clauses_independently_of_delta_boundaries() {
+        for separator in [",", ";", ":", "—", "–"] {
+            let first = format!("{}ready{separator}", "word ".repeat(18));
+            let text = format!("{first} {}finished.", "word ".repeat(35));
+            let expected = vec![first, format!("{}finished.", "word ".repeat(35))];
+            for split in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+                let mut speech = Speech::default();
+                let mut chunks = speech.push(&text[..split], false);
+                chunks.extend(speech.push(&text[split..], false));
+                chunks.extend(speech.push("", true));
+                assert_eq!(chunks, expected, "split {split}: {separator}");
+            }
+            let mut speech = Speech::default();
+            let mut chunks = Vec::new();
+            for c in text.chars() {
+                chunks.extend(speech.push(&c.to_string(), false));
+            }
+            chunks.extend(speech.push("", true));
+            assert_eq!(chunks, expected);
+        }
+    }
+    #[test]
+    fn byte_horizon_prefers_clauses_and_word_horizon_still_bounds_short_words() {
+        let first = format!("{}ready,", "lengthyword ".repeat(12));
+        let text = format!("{first} {}done.", "lengthyword ".repeat(20));
+        let chunks = Speech::default().push(&text, true);
+        assert_eq!(chunks[0], first);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= MAX_CHUNK_BYTES));
+        let chunks = Speech::default().push(&"a ".repeat(100), true);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.split_whitespace().count())
+                .collect::<Vec<_>>(),
+            [40, 40, 20]
+        );
+    }
+    #[test]
+    fn safety_horizon_cuts_preserve_words_at_every_delta_split() {
+        for text in [
+            format!("{}tail.", "lengthyword ".repeat(60)),
+            format!("{}tail.", "a ".repeat(100)),
+            format!(
+                "{}boundary, {}tail.",
+                "word ".repeat(60),
+                "word ".repeat(50)
+            ),
+        ] {
+            let expected = Speech::default().push(&text, true);
+            for split in 0..=text.len() {
+                let mut speech = Speech::default();
+                let mut chunks = speech.push(&text[..split], false);
+                chunks.extend(speech.push(&text[split..], false));
+                chunks.extend(speech.push("", true));
+                assert_eq!(chunks, expected, "split {split}");
+                assert_eq!(chunks.join(" "), text);
+            }
+        }
+    }
+    #[test]
+    fn abbreviations_initials_and_short_sentences_are_stable_at_every_split() {
+        for text in [
+            "Please ask Mr. Smith to continue. Done.",
+            "Please ask Dr. Jones to continue. Done.",
+            "Ask Prof. J. Smith about the U.S. team. Done.",
+            "Try another option, e.g. a smaller model. Done.",
+            "Use natural phrasing, i.e. complete sentences. Done.",
+            "Compare the small model vs. the large model. Done.",
+        ] {
+            let expected = vec![text.strip_suffix(" Done.").unwrap(), "Done."];
+            for split in 0..=text.len() {
+                let mut speech = Speech::default();
+                let mut chunks = speech.push(&text[..split], false);
+                chunks.extend(speech.push(&text[split..], false));
+                chunks.extend(speech.push("", true));
+                assert_eq!(chunks, expected, "split {split}: {text}");
+            }
+        }
+        assert_eq!(
+            Speech::default().push("Sure. Ready? Yes!", true),
+            ["Sure.", "Ready?", "Yes!"]
+        );
+        let mut speech = Speech::default();
+        assert!(speech.push("Sure.", false).is_empty());
+        assert_eq!(speech.push(" ", false), ["Sure."]);
     }
     #[test]
     fn bounded_chunks() {

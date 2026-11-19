@@ -11,7 +11,13 @@ export function createMain(
 ): Plugin.MainSetup {
   return (ctx) => {
     const prefs = ctx.storage.store("devices", { schema: Devices, initial: {} });
-    let state: Snapshot = { status: "off", serverID: null, sessionID: null };
+    let state: Snapshot = {
+      status: "off",
+      paused: false,
+      serverID: null,
+      sessionID: null,
+      interrupted: null,
+    };
     let owner: number | undefined;
     let bridge: ReturnType<typeof createBridge> | undefined;
     let disposed = false;
@@ -147,6 +153,12 @@ export function createMain(
         return serialize(async () => {
           checkOwner(caller.window);
           bridge?.mute();
+        });
+      },
+      pause(input, caller) {
+        return serialize(async () => {
+          checkOwner(caller.window);
+          bridge?.pause(input.paused);
         });
       },
     });

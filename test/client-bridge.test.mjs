@@ -1806,6 +1806,8 @@ test("bridge snapshots authenticated client and location; runtime receives no en
     serverID: "remote-server",
     sessionID: "session",
     status: "loading",
+    paused: false,
+    interrupted: null,
   });
   await begin(s);
   assert.deepEqual(s.calls.find(([type]) => type === "prompt")[1], {
@@ -1815,6 +1817,39 @@ test("bridge snapshots authenticated client and location; runtime receives no en
   await s.bridge.stop();
   assert.equal(s.stopped(), 1);
   assert.deepEqual(s.calls.find(([type]) => type === "stop")[2].location, { directory: "/chosen" });
+});
+
+test("pause is a local spoken-output gate, not a teardown", async () => {
+  const s = setup();
+  await s.bridge.start();
+  s.engine({ type: "status", state: "speaking" });
+  s.bridge.pause(true);
+  assert.deepEqual(s.frames.at(-1), { type: "pause", on: true });
+  assert.equal(s.bridge.snapshot().status, "speaking");
+  assert.equal(s.bridge.snapshot().paused, true);
+  assert.equal(s.stopped(), 0, "pause must not stop the runtime");
+
+  s.bridge.pause(false);
+  assert.deepEqual(s.frames.at(-1), { type: "pause", on: false });
+  assert.equal(s.bridge.snapshot().paused, false);
+  assert.equal(s.stopped(), 0);
+
+  await s.bridge.stop();
+  assert.equal(s.bridge.snapshot().paused, false, "stop clears the pause overlay");
+});
+
+test("an interrupt records what was heard for display and clears on the next prompt", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  s.engine({ type: "interrupt", turn: 1, played_ms: 500, generated_ms: 2000, heard: "Hello" });
+  await tick();
+  assert.deepEqual(s.bridge.snapshot().interrupted, { heard: "Hello", playedPercent: 25 });
+  const sent = JSON.stringify(s.calls);
+  assert.ok(!sent.includes('Hello"'), "heard text never reaches the server");
+  s.engine({ type: "prompt", turn: 2, text: "next" });
+  await tick();
+  assert.equal(s.bridge.snapshot().interrupted, null);
 });
 
 test("reply correlation ignores reasoning, duplicates, foreign sessions and stale assistants", async () => {

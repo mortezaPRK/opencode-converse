@@ -17,7 +17,7 @@ import { dirname, join, posix, win32 } from "node:path";
 import { isAbsolutePath } from "../config.js";
 
 /** Engine installation layout version. Must match package.json. */
-export const RUNTIME_VERSION = "0.1.0";
+export const RUNTIME_VERSION = "0.2.0";
 export const PACKAGE_NAME = "@mortz.prk/opencode-converse";
 const STATE_NAME = "opencode-converse";
 const COMPLETE = ".complete";

@@ -60,6 +60,7 @@ export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings
     ...(config.asrThreads === undefined ? {} : { asrThreads: config.asrThreads }),
     ...(config.ttsThreads === undefined ? {} : { ttsThreads: config.ttsThreads }),
     ...(config.useGpu === undefined ? {} : { useGpu: config.useGpu }),
+    ...(config.endpointing === undefined ? {} : { endpointing: config.endpointing }),
   };
 }
 
@@ -68,6 +69,13 @@ function exact(value: Record<string, unknown>, fields: string[]) {
     Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key))
   );
 }
+function exactOptional(value: Record<string, unknown>, required: string[], optional: string[]) {
+  return (
+    required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
+  );
+}
+const milliseconds = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
 const turn = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
 export function parseEngineMessage(value: unknown): EngineMessage {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -91,7 +99,17 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     (v.text as string).trim()
   )
     return v as EngineMessage;
-  if (v.type === "interrupt" && exact(v, ["type", "turn"]) && turn(v.turn))
+  if (
+    v.type === "interrupt" &&
+    turn(v.turn) &&
+    exactOptional(v, ["type", "turn"], ["played_ms", "generated_ms", "heard"]) &&
+    (v.heard === undefined || (text(v.heard) && Buffer.byteLength(v.heard as string) <= 4096)) &&
+    (v.played_ms === undefined) === (v.generated_ms === undefined) &&
+    (v.played_ms === undefined ||
+      (milliseconds(v.played_ms) &&
+        milliseconds(v.generated_ms) &&
+        (v.played_ms as number) <= (v.generated_ms as number)))
+  )
     return v as EngineMessage;
   if (
     v.type === "error" &&

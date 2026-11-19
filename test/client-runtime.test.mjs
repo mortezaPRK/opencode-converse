@@ -95,6 +95,14 @@ test("runtime sends configured inference tuning over init", async () => {
   await runtime.stop();
 });
 
+test("runtime sends endpointing over init", async () => {
+  const { proc, runtime } = setup({ runtime: { endpointing: "patient" } });
+  proc.frame({ type: "hello", protocol: 1 });
+  await runtime.ready;
+  assert.equal(proc.frames[0].settings.endpointing, "patient");
+  await runtime.stop();
+});
+
 test("runtimeSettings contains only inference tuning", () => {
   assert.deepEqual(runtimeSettings({ asrThreads: 2, useGpu: false }), {
     asrThreads: 2,
@@ -268,8 +276,20 @@ test("strict validator rejects coercions, invalid turns and extra settings", () 
     { type: "prompt", turn: 1.1, text: "a" },
     { type: "prompt", turn: 1, text: " " },
     { type: "interrupt", turn: 1, extra: true },
+    { type: "interrupt", turn: 1, played_ms: 5 },
+    { type: "interrupt", turn: 1, played_ms: 9, generated_ms: 5 },
+    { type: "interrupt", turn: 1, played_ms: -1, generated_ms: 5 },
+    { type: "interrupt", turn: 1, played_ms: 1.5, generated_ms: 5 },
+    { type: "interrupt", turn: 1, heard: 5 },
+    { type: "interrupt", turn: 1, heard: "x".repeat(4097) },
   ])
     assert.throws(() => parseEngineMessage(value));
+  for (const value of [
+    { type: "interrupt", turn: 1 },
+    { type: "interrupt", turn: 1, played_ms: 900, generated_ms: 2400 },
+    { type: "interrupt", turn: 1, played_ms: 900, generated_ms: 2400, heard: "Hello there" },
+  ])
+    assert.deepEqual(parseEngineMessage(value), value);
   assert.deepEqual(
     localSettings({ inputDevice: "a", outputDevice: "b", binary: "evil", model: "evil" }),
     { inputDevice: "a", outputDevice: "b" },

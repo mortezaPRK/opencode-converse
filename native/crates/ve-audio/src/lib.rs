@@ -1,7 +1,7 @@
 //! Full-duplex device I/O at native device rates, with off-callback resampling.
 mod io;
 mod resample;
-pub use io::{AudioIo, Capture, CaptureEvent};
+pub use io::{AudioIo, Capture, CaptureEvent, PlaybackProgress};
 pub use resample::StreamResampler;
 
 #[derive(Debug, Clone)]

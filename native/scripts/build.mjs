@@ -1,5 +1,4 @@
-// Source-build entry point. sherpa-rs-sys 0.6.8 copies shared libraries into
-// target/<profile>/deps but does not create that directory on recent Cargo.
+// Source-build entry point. Prepares Cargo's target/<profile>/deps directories before building.
 import { mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";

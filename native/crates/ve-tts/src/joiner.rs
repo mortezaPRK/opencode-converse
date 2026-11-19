@@ -73,6 +73,22 @@ pub struct Joiner {
     started: bool,
     /// What kind of boundary the previous chunk ended on.
     prev_join: Join,
+    /// The chunk currently being streamed through [`Joiner::push_part`], if any.
+    live: Option<Live>,
+}
+
+/// Streaming state for one chunk. Holds back only what trimming and the closing fade need:
+/// the guard band before the first sound, and the silent tail plus fade after the last.
+#[derive(Default)]
+struct Live {
+    /// Silence seen before the first sound, at most one guard band.
+    lead: Vec<f32>,
+    /// Whether the first sound has been seen and the gap emitted.
+    found: bool,
+    /// Samples not yet released: everything after the last released sample.
+    held: Vec<f32>,
+    /// Speech samples already released for this chunk (excluding the gap).
+    emitted: usize,
 }
 
 impl Joiner {
@@ -87,6 +103,7 @@ impl Joiner {
             clause_gap: ms(DEFAULT_CLAUSE_GAP_MS),
             started: false,
             prev_join: Join::First,
+            live: None,
         }
     }
 
@@ -133,6 +150,103 @@ impl Joiner {
         out
     }
 
+    /// Streaming form of [`Self::push`]: feed the PCM of one chunk as it is generated and play
+    /// what is returned. After [`Self::end_chunk`] the concatenated output equals `push` on the
+    /// whole chunk for any chunk of at least two fade lengths. Audio is only held back while it
+    /// could still be trailing silence, so the first sound is returned as soon as it arrives.
+    pub fn push_part(&mut self, part: &[f32]) -> Vec<f32> {
+        let mut live = self.live.take().unwrap_or_default();
+        let mut out = Vec::new();
+        if live.found {
+            live.held.extend_from_slice(part);
+        } else if let Some(first) = part.iter().position(|s| s.abs() > SILENCE_THRESHOLD) {
+            let lead = live.lead.len();
+            live.lead.extend_from_slice(part);
+            live.held = live
+                .lead
+                .split_off((lead + first).saturating_sub(self.guard));
+            live.lead.clear();
+            live.found = true;
+            let join = if self.started {
+                self.prev_join
+            } else {
+                Join::First
+            };
+            let gap = match join {
+                Join::First | Join::MidPhrase => 0,
+                Join::Clause => self.clause_gap,
+                Join::Sentence => self.sentence_gap,
+            };
+            out.extend(std::iter::repeat_n(0.0, gap));
+        } else {
+            live.lead.extend_from_slice(part);
+            let excess = live.lead.len().saturating_sub(self.guard);
+            live.lead.drain(..excess);
+        }
+        if live.found {
+            // Samples before `last - fade` can never be inside the closing fade or the
+            // trimmed tail, so they are final.
+            let last = live
+                .held
+                .iter()
+                .rposition(|s| s.abs() > SILENCE_THRESHOLD)
+                .expect("held always contains the first sound");
+            let release = (last + 1).saturating_sub(self.fade);
+            let released: Vec<f32> = live.held.drain(..release).collect();
+            out.extend(self.fade_in(&released, live.emitted));
+            live.emitted += released.len();
+        }
+        self.live = Some(live);
+        out
+    }
+
+    /// Finish the chunk started with [`Self::push_part`]: emit the trimmed, faded tail and
+    /// record the boundary `text` leaves for the next chunk. A chunk with no sound emits nothing.
+    pub fn end_chunk(&mut self, text: &str) -> Vec<f32> {
+        let Some(live) = self.live.take() else {
+            return Vec::new();
+        };
+        if !live.found {
+            return Vec::new();
+        }
+        let last = live
+            .held
+            .iter()
+            .rposition(|s| s.abs() > SILENCE_THRESHOLD)
+            .expect("held always contains the first sound");
+        let end = (last + 1 + self.guard).min(live.held.len());
+        let mut tail = self.fade_in(&live.held[..end], live.emitted);
+        let total = live.emitted + tail.len();
+        if total == 1 {
+            tail[0] = 0.0;
+        } else {
+            let n = self.fade.min(total / 2).min(tail.len());
+            let len = tail.len();
+            for (i, s) in tail[len - n..].iter_mut().enumerate() {
+                *s *= if n == 1 {
+                    0.0
+                } else {
+                    (n - 1 - i) as f32 / (n - 1) as f32
+                };
+            }
+        }
+        self.started = true;
+        self.prev_join = boundary_of(text);
+        tail
+    }
+
+    /// Apply the opening fade to `samples` that begin `offset` samples into the speech.
+    fn fade_in(&self, samples: &[f32], offset: usize) -> Vec<f32> {
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| match offset + i {
+                k if k < self.fade => s * (k as f32 / self.fade as f32),
+                _ => *s,
+            })
+            .collect()
+    }
+
     /// Flush any rounding error. Kept for symmetry: the joiner holds nothing
     /// back, so this is normally empty.
     pub fn flush(&mut self) -> Vec<f32> {
@@ -143,6 +257,7 @@ impl Joiner {
     pub fn reset(&mut self) {
         self.started = false;
         self.prev_join = Join::First;
+        self.live = None;
     }
 
     /// Strip leading and trailing silence, keeping a guard band of speech-level
@@ -414,5 +529,84 @@ mod tests {
         // After reset the next chunk is "first" again, so no leading gap.
         let out = j.push("Fresh.", &padded(10, 100, 10));
         assert!(out.len() < 200);
+    }
+
+    fn streamed(j: &mut Joiner, text: &str, samples: &[f32], part: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for piece in samples.chunks(part) {
+            out.extend(j.push_part(piece));
+        }
+        out.extend(j.end_chunk(text));
+        out
+    }
+
+    #[test]
+    fn streaming_matches_whole_chunk_joining_for_any_split() {
+        let wave = |lead: usize, speech: usize, trail: usize| {
+            let mut v = vec![0.0; lead];
+            v.extend((0..speech).map(|i| 0.5 * ((i % 37) as f32 / 37.0 + 0.1)));
+            v.extend(vec![0.0; trail]);
+            v
+        };
+        let chunks = [
+            ("Hello there.", wave(3000, 9000, 4000)),
+            ("and then,", wave(0, 5000, 0)),
+            ("more words", wave(700, 2500, 9000)),
+            ("Done!", wave(20, 3000, 30)),
+        ];
+        for part in [1, 7, 480, 1920, 100_000] {
+            let mut whole = Joiner::new(22_050);
+            let mut live = Joiner::new(22_050);
+            for (text, samples) in &chunks {
+                let expected = whole.push(text, samples);
+                let actual = streamed(&mut live, text, samples, part);
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "len: part size {part}, chunk {text}"
+                );
+                let at = actual.iter().zip(&expected).position(|(a, b)| a != b);
+                assert!(
+                    at.is_none(),
+                    "part size {part}, chunk {text}: first diff at {at:?} of {}: {:?} vs {:?}",
+                    actual.len(),
+                    at.map(|i| actual[i]),
+                    at.map(|i| expected[i])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_sound_is_released_before_the_chunk_ends() {
+        let mut j = Joiner::new(22_050);
+        assert!(j.push_part(&vec![0.0; 4000]).is_empty());
+        let out = j.push_part(&vec![0.5; 4000]);
+        assert!(out.len() > 2000, "speech must start flowing immediately");
+    }
+
+    #[test]
+    fn silent_streamed_chunk_emits_nothing_and_keeps_the_boundary() {
+        let mut j = Joiner::new(22_050);
+        assert!(j.push_part(&vec![0.0; 5000]).is_empty());
+        assert!(j.end_chunk("Silent.").is_empty());
+        let first = streamed(&mut j, "Real.", &vec![0.5; 3000], 1000);
+        assert_eq!(first[0], 0.0);
+        assert!(
+            first.iter().filter(|s| **s == 0.0).count() < 3,
+            "no gap after a dropped chunk"
+        );
+    }
+
+    #[test]
+    fn reset_discards_a_partially_streamed_chunk() {
+        let mut j = Joiner::new(22_050);
+        let _ = j.push_part(&vec![0.5; 3000]);
+        j.reset();
+        let mut fresh = Joiner::new(22_050);
+        assert_eq!(
+            streamed(&mut j, "Hi.", &vec![0.5; 3000], 700),
+            streamed(&mut fresh, "Hi.", &vec![0.5; 3000], 700)
+        );
     }
 }

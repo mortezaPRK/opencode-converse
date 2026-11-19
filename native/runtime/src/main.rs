@@ -184,6 +184,7 @@ struct FixtureSink {
     fence: generation::Generation,
     jobs: std::collections::VecDeque<(u64, Arc<AtomicBool>, String)>,
     finish: Option<u64>,
+    paused: bool,
     trace: bool,
     #[cfg(test)]
     played: Vec<String>,
@@ -206,6 +207,7 @@ impl FixtureSink {
             }
             Action::Finish => self.finish = Some(epoch),
             Action::Mute(_) => {}
+            Action::Pause(on) => self.paused = on,
         }
         Ok(())
     }
@@ -215,6 +217,9 @@ impl FixtureSink {
         })
     }
     fn tick_with(&mut self, mut trace: impl FnMut(&str)) -> Option<u64> {
+        if self.paused {
+            return None;
+        }
         if let Some((epoch, token, text)) = self.jobs.pop_front() {
             if self.fence.allows(epoch, &token) {
                 if self.trace {
@@ -272,6 +277,29 @@ impl Backend {
                 self.fixture.finish = Some(epoch);
             }
         }
+    }
+    /// Attach what the user actually heard to interrupts, before Cancel resets the window.
+    fn annotate_interrupts(&self, out: &mut [Engine]) {
+        #[cfg(feature = "native-audio")]
+        if let Some(audio) = &self.audio {
+            for message in out {
+                if let Engine::Interrupt {
+                    played_ms,
+                    generated_ms,
+                    heard: heard_out,
+                    ..
+                } = message
+                {
+                    if let Some((played, generated)) = audio.reply_progress() {
+                        *played_ms = Some(played.min(generated));
+                        *generated_ms = Some(generated);
+                        *heard_out = audio.heard_text(played.min(generated), generated);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "native-audio"))]
+        let _ = out;
     }
     fn healthy(&self) -> bool {
         #[cfg(feature = "native-audio")]
@@ -429,6 +457,7 @@ fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
                 return 1;
             }
         }
+        backend.annotate_interrupts(&mut out);
         for action in actions {
             if let Err(e) = backend.action(action, &tx) {
                 error("backend_error", e.to_string());
@@ -453,13 +482,11 @@ fn doctor() -> i32 {
     let models_ok = match paths::check_models() {
         Ok(models) => {
             eprintln!(
-                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR: {}\n  TTS model: {}\n  TTS tokens: {}\n  TTS data: {}",
+                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR: {}\n  TTS (Phonon) directory: {}",
                 models.vad.display(),
                 models.turn.display(),
                 models.asr.display(),
-                models.tts.model.display(),
-                models.tts.tokens.display(),
-                models.tts.data_dir.display(),
+                models.tts.dir.display(),
             );
             true
         }
@@ -835,6 +862,23 @@ mod tests {
             assert!(f.backend.fixture.played.is_empty());
         }
     }
+    #[test]
+    fn fixture_pause_holds_queued_speech_until_resume() {
+        let mut f = SpeechFixture::new();
+        f.announcement("paused", "This waits for resume.");
+        f.host(Host::Pause { on: true });
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert!(f.backend.fixture.played.is_empty());
+
+        f.host(Host::Pause { on: false });
+        for _ in 0..5 {
+            f.tick();
+        }
+        assert_eq!(f.backend.fixture.played, ["This waits for resume."]);
+    }
+
     #[test]
     fn abandoned_capture_and_duplicate_terminal_preserve_actual_announcement_playback() {
         let mut f = SpeechFixture::new();

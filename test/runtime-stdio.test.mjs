@@ -319,7 +319,7 @@ async function runtime(t, args = ["run", "--test-fixture"], dir) {
     }
   }
   const send = (frame) => child.stdin.write(JSON.stringify(frame) + "\n");
-  return { child, frames, closed, wait, send };
+  return { child, frames, closed, wait, send, stderr: () => stderr };
 }
 
 test(
@@ -362,6 +362,36 @@ test(
     assert.equal(proc.frames.filter((f) => f.state === "speaking").length, 0);
     proc.child.stdin.end();
     assert.equal((await proc.closed).code, 0);
+  },
+);
+
+test(
+  "pause holds spoken output and resumes it without a restart",
+  { timeout: 15_000 },
+  async (t) => {
+    const proc = await runtime(t);
+    proc.send(init);
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+    proc.send({ type: "pause", on: true });
+    proc.send({ type: "reply_end", turn: 1, reply: "held", text: "Wait for resume." });
+    proc.send({ type: "turn_end", turn: 1, reason: "completed" });
+    await proc.wait((frames) => frames.some((f) => f.state === "speaking"));
+    // Give the fixture several playback ticks; nothing may reach the device trace.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(playbackTrace(proc.stderr()), []);
+    assert.equal(proc.child.exitCode, null, "pausing must not end the runtime");
+
+    proc.send({ type: "pause", on: false });
+    await proc.wait((frames) => frames.at(-1)?.state === "listening");
+    assert.deepEqual(playbackTrace(proc.stderr()), [
+      { fixture: "played", text: "Wait for resume." },
+    ]);
+    proc.send({ type: "shutdown" });
+    const result = await proc.closed;
+    assert.equal(result.code, 0);
+    assert.deepEqual(playbackTrace(result.stderr), [
+      { fixture: "played", text: "Wait for resume." },
+    ]);
   },
 );
 

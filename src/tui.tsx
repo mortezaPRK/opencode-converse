@@ -18,7 +18,9 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
       const [prefs] = ctx.storage.store<LocalSettings>("devices", { initial: {} });
       const [state, setState] = createSignal<Snapshot>({
         status: "off",
+        paused: false,
         sessionID: null,
+        interrupted: null,
         serverID: null,
       });
       // A failed turn or start leaves the engine idle, so the error outlives the

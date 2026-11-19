@@ -201,6 +201,73 @@ fn copy_cached(cached: &Path, staged: &Path, asset: &Asset) -> Result<()> {
     ))
 }
 
+/// Download (or copy from the verified cache) one pinned artifact into a private staged file.
+/// The returned path is the only authoritative source for installation.
+fn fetch(
+    client: &reqwest::blocking::Client,
+    cache: &Path,
+    stage: &Path,
+    name: &str,
+    pin: &Asset,
+) -> Result<std::path::PathBuf> {
+    let cached = cache.join(&pin.file);
+    let download = stage.join(name);
+    if fs::symlink_metadata(&cached).is_ok() {
+        copy_cached(&cached, &download, pin)?;
+        return Ok(download);
+    }
+    // An unverified cache entry is not overwritten or trusted.
+    ensure!(
+        !cached.try_exists()?,
+        "Unverified model cache {}; remove it explicitly and retry",
+        cached.display()
+    );
+    eprintln!("Downloading {} ({} bytes)", pin.file, pin.bytes);
+    let response = client.get(&pin.url).send()?.error_for_status()?;
+    if let Some(length) = response.content_length() {
+        ensure!(
+            length == pin.bytes,
+            "Unexpected download Content-Length for {}",
+            pin.file
+        );
+    }
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&download)?;
+    let n = std::io::copy(&mut response.take(pin.bytes + 1), &mut out)?;
+    out.flush()?;
+    out.sync_all()?;
+    ensure!(
+        n == pin.bytes && verified(&download, pin),
+        "SHA-256/size verification failed for {}",
+        pin.file
+    );
+    let cache_stage = stage.join(format!("{name}-cache-publication"));
+    copy_verified(&download, &cache_stage, pin)?;
+    crate::paths::publish_noclobber(&cache_stage, &cached)?;
+    Ok(download)
+}
+
+/// A single-file pin for a `files` member. Its cache name is namespaced by the asset id.
+fn member_pin(asset: &Asset, member: &inventory::AssetFile) -> Asset {
+    Asset {
+        id: asset.id.clone(),
+        file: format!("{}--{}", asset.id, member.path),
+        url: member.url.clone(),
+        sha256: member.sha256.clone(),
+        bytes: member.bytes,
+        format: Format::File,
+        files: vec![],
+        install: None,
+        runtime: inventory::RuntimeAsset {
+            path: member.path.clone(),
+            tokens: None,
+            data_dir: None,
+        },
+    }
+}
+
 pub fn install() -> Result<()> {
     let inventory = Inventory::load()?;
     let data = crate::paths::state_dir()?;
@@ -226,46 +293,40 @@ pub fn install() -> Result<()> {
             asset.id
         );
         let _lock = asset_lock(&data.join("model-locks"), asset)?;
-        let cached = cache.join(&asset.file);
         let stage = tempfile::Builder::new()
             .prefix(".model-stage-")
             .tempdir_in(&data)?;
-        let download = stage.path().join("download");
-        if fs::symlink_metadata(&cached).is_ok() {
-            copy_cached(&cached, &download, asset)?;
-        } else {
-            // An unverified cache entry is not overwritten or trusted.
-            ensure!(
-                !cached.try_exists()?,
-                "Unverified model cache {}; remove it explicitly and retry",
-                cached.display()
-            );
-            eprintln!("Downloading {} ({} bytes)", asset.id, asset.bytes);
-            let response = client.get(&asset.url).send()?.error_for_status()?;
-            if let Some(length) = response.content_length() {
-                ensure!(
-                    length == asset.bytes,
-                    "Unexpected download Content-Length for {}",
-                    asset.id
-                );
+        if asset.format == Format::Files {
+            let target = models.join(asset.runtime_path());
+            let staged = stage.path().join("files");
+            fs::create_dir(&staged)?;
+            for (index, member) in asset.files.iter().enumerate() {
+                let pin = member_pin(asset, member);
+                let download = fetch(
+                    &client,
+                    &cache,
+                    stage.path(),
+                    &format!("download-{index}"),
+                    &pin,
+                )?;
+                // The verified private copy becomes the staged member without reopening a cache path.
+                fs::rename(&download, staged.join(&member.path))?;
             }
-            let mut out = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&download)?;
-            let n = std::io::copy(&mut response.take(asset.bytes + 1), &mut out)?;
-            out.flush()?;
-            out.sync_all()?;
-            ensure!(
-                n == asset.bytes && verified(&download, asset),
-                "SHA-256/size verification failed for {}",
-                asset.id
-            );
-            let cache_stage = stage.path().join("cache-publication");
-            copy_verified(&download, &cache_stage, asset)?;
-            crate::paths::publish_noclobber(&cache_stage, &cached)?;
+            if target.exists() {
+                ensure!(
+                    same_tree(&staged, &target)?,
+                    "Existing model directory differs; remove {} explicitly and retry",
+                    target.display()
+                );
+            } else {
+                crate::paths::publish_noclobber(&staged, &target)?;
+            }
+            eprintln!("Verified and installed {}", asset.id);
+            continue;
         }
+        let download = fetch(&client, &cache, stage.path(), "download", asset)?;
         match asset.format {
+            Format::Files => unreachable!("installed above"),
             Format::File => {
                 let target = models.join(asset.runtime_path());
                 if let Some(parent) = target.parent() {
@@ -360,6 +421,7 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(content)),
             bytes: content.len() as u64,
             format: Format::File,
+            files: vec![],
             install: None,
             runtime: inventory::RuntimeAsset {
                 path: "fixture.bin".into(),
@@ -443,10 +505,59 @@ mod tests {
     fn compiled_inventory_is_pinned() {
         let inv = Inventory::load().unwrap();
         assert_eq!(inv.assets.len(), 4);
-        assert!(inv
-            .assets
-            .iter()
-            .all(|a| a.url.starts_with("https://") && a.sha256.len() == 64 && a.bytes > 0));
+        for asset in &inv.assets {
+            if asset.format == Format::Files {
+                assert!(asset
+                    .files
+                    .iter()
+                    .all(|f| f.url.starts_with("https://") && f.sha256.len() == 64 && f.bytes > 0));
+            } else {
+                assert!(asset.url.starts_with("https://") && asset.sha256.len() == 64);
+            }
+        }
+    }
+
+    #[test]
+    fn member_hash_mismatch_is_rejected_and_never_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = asset(b"unused");
+        let member = inventory::AssetFile {
+            path: "weights.bin".into(),
+            url: "https://invalid.example/weights".into(),
+            sha256: format!("{:x}", Sha256::digest(b"expected")),
+            bytes: 8,
+        };
+        let pin = member_pin(&parent, &member);
+        assert_eq!(pin.file, "fixture--weights.bin");
+        let cached = dir.path().join(&pin.file);
+        fs::write(&cached, b"tampered").unwrap(); // right length, wrong digest
+        let staged = dir.path().join("staged");
+        assert!(copy_cached(&cached, &staged, &pin).is_err());
+        assert!(!staged.exists() || !verified(&staged, &pin));
+        let staged = dir.path().join("staged-good");
+        fs::write(&cached, b"expected").unwrap();
+        copy_cached(&cached, &staged, &pin).unwrap();
+        assert!(verified(&staged, &pin));
+    }
+
+    #[test]
+    fn files_directory_publication_is_no_clobber_and_detects_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("models").join("tts");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(staged.join("a.bin"), b"one").unwrap();
+        crate::paths::publish_noclobber(&staged, &target).unwrap();
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("a.bin"), b"one").unwrap();
+        assert!(same_tree(&staged, &target).unwrap());
+        assert!(crate::paths::publish_noclobber(&staged, &target).is_err());
+        fs::write(target.join("a.bin"), b"two").unwrap();
+        assert!(!same_tree(&staged, &target).unwrap());
+        fs::write(target.join("a.bin"), b"one").unwrap();
+        fs::write(target.join("extra.bin"), b"x").unwrap();
+        assert!(!same_tree(&staged, &target).unwrap());
     }
     #[test]
     fn rejects_links_in_archive() {

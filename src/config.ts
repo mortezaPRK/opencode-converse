@@ -15,6 +15,7 @@ export interface RuntimeConfig {
   readonly asrThreads?: number;
   readonly ttsThreads?: number;
   readonly useGpu?: boolean;
+  readonly endpointing?: Endpointing;
 }
 
 export const PLUGIN_OPTION_KEYS = [
@@ -24,7 +25,10 @@ export const PLUGIN_OPTION_KEYS = [
   "asrThreads",
   "ttsThreads",
   "useGpu",
+  "endpointing",
 ] as const;
+
+export type Endpointing = "responsive" | "patient";
 
 const MAX_THREADS = 256;
 
@@ -65,6 +69,13 @@ function booleanOption(value: unknown, name: string): boolean | undefined {
   return value;
 }
 
+function endpointingOption(value: unknown): Endpointing | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value !== "responsive" && value !== "patient")
+    throw new Error('endpointing must be "responsive" or "patient"');
+  return value;
+}
+
 /** Structural parser shared by the server half and the local UI half. */
 export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const input = value === undefined || value === null ? {} : object(value);
@@ -72,10 +83,12 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const asrThreads = threadOption(input.asrThreads, "asrThreads");
   const ttsThreads = threadOption(input.ttsThreads, "ttsThreads");
   const useGpu = booleanOption(input.useGpu, "useGpu");
+  const endpointing = endpointingOption(input.endpointing);
   return {
     ...(asrThreads === undefined ? {} : { asrThreads }),
     ...(ttsThreads === undefined ? {} : { ttsThreads }),
     ...(useGpu === undefined ? {} : { useGpu }),
+    ...(endpointing === undefined ? {} : { endpointing }),
   };
 }
 

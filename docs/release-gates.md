@@ -33,6 +33,10 @@ architectures are not implied by operating-system support.
   option or environment variable can redirect them. The packaged engine is copied
   once into the state folder, and models are reused across engine versions; device
   preferences stay in host storage.
+- Pause silences spoken output without cancelling the turn, discarding queued
+  speech, or stopping the runtime; resume continues the held speech. Verify on a
+  real device that nothing is audible while paused and that Stop still releases audio.
+- Barge-in while paused discards the held speech and starts the user's turn.
 - Bounded protocol frames and queues fail clearly rather than growing without limit.
 - No default logs contain transcripts, credentials, or raw native-library output.
 
@@ -40,6 +44,11 @@ architectures are not implied by operating-system support.
 
 - English ASR accuracy and spoken technical terms are evaluated on a fixed sample.
 - Measure first-audio and interruption latency on representative hardware.
+- Compare `endpointing: "responsive"` and `"patient"` on a fixed sample with natural
+  mid-sentence pauses: record premature cut-offs and added end-of-turn latency.
+- Check the Interrupted note in the transcript against what was actually audible on
+  a real device: the heard text must match what was played, within a word or two,
+  and must never be added to agent context.
 - Measure false prompts from the assistant's own voice on speakers. Require
   headphones unless speaker use has passed an explicit echo/self-trigger test.
 - Test default-device changes, Bluetooth devices, and microphone removal.
@@ -48,11 +57,12 @@ architectures are not implied by operating-system support.
 
 - Pin model versions, sizes and hashes; verify downloads before activation.
 - Review exact model cards, datasets/voice terms, native-library notices, and
-  transitive assets. Address eSpeak NG obligations for the actual bundle.
+  transitive assets. Verify the Phonon Apache-2.0 notice and Kyutai (Pocket TTS /
+  Mimi) attribution for the actual bundle.
 - Produce a third-party inventory, notices, and any required source materials.
 - Review npm and Cargo dependency advisories. Do not use forced dependency upgrades
   as a substitute for testing the supported SDK.
-- Package each target's staged engine and required shared libraries under
+- Package each target's staged engine under
   `assets/bin/<platform>-<arch>/`. Verify the copied state-folder engine starts
   without a compiler, Node runtime, or engine download on the user's machine.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.

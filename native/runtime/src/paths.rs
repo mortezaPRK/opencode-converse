@@ -6,14 +6,13 @@ static TEST_STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[cfg(feature = "native-audio")]
 pub const DEFAULT_ASR_THREADS: u16 = 4;
-#[cfg(feature = "native-audio")]
-pub const DEFAULT_TTS_THREADS: u16 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TtsPaths {
-    pub model: PathBuf,
-    pub tokens: PathBuf,
-    pub data_dir: PathBuf,
+    /// Phonon checkpoint directory: config, tokenizer, q8 weights, default voice, license.
+    pub dir: PathBuf,
+    /// Every pinned member the loader and the license notice need, as absolute paths.
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,15 +171,12 @@ pub fn resolve_models() -> anyhow::Result<ModelPaths> {
         turn: models.join(turn.runtime_path()),
         asr: models.join(asr.runtime_path()),
         tts: TtsPaths {
-            model: models.join(tts.runtime_path()),
-            tokens: models.join(
-                tts.tokens_path()
-                    .ok_or_else(|| anyhow::anyhow!("TTS asset has no tokens path"))?,
-            ),
-            data_dir: models.join(
-                tts.data_dir()
-                    .ok_or_else(|| anyhow::anyhow!("TTS asset has no dataDir"))?,
-            ),
+            dir: models.join(tts.runtime_path()),
+            files: tts
+                .files
+                .iter()
+                .map(|file| models.join(tts.runtime_path()).join(&file.path))
+                .collect(),
         },
     })
 }
@@ -189,20 +185,15 @@ pub fn check_models() -> anyhow::Result<ModelPaths> {
     let paths = resolve_models()?;
     let models = models_dir()?;
     let mut missing = vec![];
-    for (name, path, directory) in [
-        ("vad", &paths.vad, false),
-        ("turn", &paths.turn, false),
-        ("asr", &paths.asr, false),
-        ("tts model", &paths.tts.model, false),
-        ("tts tokens", &paths.tts.tokens, false),
-        ("tts data directory", &paths.tts.data_dir, true),
-    ] {
-        let present = if directory {
-            path.is_dir()
-        } else {
-            path.is_file()
-        };
-        if !present {
+    for (name, path) in [
+        ("vad", &paths.vad),
+        ("turn", &paths.turn),
+        ("asr", &paths.asr),
+    ]
+    .into_iter()
+    .chain(paths.tts.files.iter().map(|path| ("tts file", path)))
+    {
+        if !path.is_file() {
             missing.push(format!("{name}: {}", path.display()));
         }
     }
@@ -280,9 +271,13 @@ mod tests {
         assert_eq!(defaults.vad, models.join(vad.runtime_path()));
         assert_eq!(defaults.turn, models.join(turn.runtime_path()));
         assert_eq!(defaults.asr, models.join(asr.runtime_path()));
-        assert_eq!(defaults.tts.model, models.join(tts.runtime_path()));
-        assert_eq!(defaults.tts.tokens, models.join(tts.tokens_path().unwrap()));
-        assert_eq!(defaults.tts.data_dir, models.join(tts.data_dir().unwrap()));
+        assert_eq!(defaults.tts.dir, models.join(tts.runtime_path()));
+        assert_eq!(defaults.tts.files.len(), tts.files.len());
+        assert!(defaults
+            .tts
+            .files
+            .iter()
+            .all(|file| file.starts_with(&defaults.tts.dir)));
     }
 
     #[test]

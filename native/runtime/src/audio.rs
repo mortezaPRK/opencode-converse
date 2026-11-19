@@ -19,17 +19,88 @@ enum Job {
     },
     Finish(u64),
 }
+#[derive(Default)]
 struct Playback {
     audio: Option<Arc<ve_audio::AudioIo>>,
     generation: crate::generation::Generation,
+    /// Kept here so a pause requested before the device opens still applies.
+    paused: bool,
+    /// Device totals at the last cancellation; progress is reported relative to it.
+    base: ve_audio::PlaybackProgress,
+    /// Text sent to synthesis this reply with the generated-audio offset (ms) at which each
+    /// chunk began. Bounded; once full, heard text is unknown for the reply.
+    chunks: Vec<(String, u64)>,
+    chunk_bytes: usize,
+    chunks_overflowed: bool,
 }
-impl Default for Playback {
-    fn default() -> Self {
-        Self {
-            audio: None,
-            generation: Default::default(),
+
+const CHUNK_TEXT_LIMIT: usize = 64 * 1024;
+const HEARD_LIMIT: usize = 4096;
+
+fn record_chunk(state: &mut Playback, text: &str) {
+    if state.chunks_overflowed {
+        return;
+    }
+    if state.chunk_bytes + text.len() > CHUNK_TEXT_LIMIT {
+        state.chunks_overflowed = true;
+        state.chunks.clear();
+        return;
+    }
+    let Some(audio) = &state.audio else { return };
+    let start = audio
+        .playback_progress()
+        .generated_ms
+        .saturating_sub(state.base.generated_ms);
+    state.chunk_bytes += text.len();
+    state.chunks.push((text.to_owned(), start));
+}
+
+/// Text of chunks fully played plus the proportional, word-aligned part of the chunk
+/// being played. The newest `HEARD_LIMIT` bytes are kept.
+fn heard_from_chunks(chunks: &[(String, u64)], played_ms: u64, generated_ms: u64) -> String {
+    let mut heard = String::new();
+    for (i, (text, start)) in chunks.iter().enumerate() {
+        if *start >= played_ms {
+            break;
+        }
+        let end = chunks.get(i + 1).map_or(generated_ms, |next| next.1);
+        let part = if end <= played_ms || end <= *start {
+            text.as_str()
+        } else {
+            let keep = text.chars().count() as u64 * (played_ms - start) / (end - start);
+            let cut = text
+                .char_indices()
+                .nth(keep as usize)
+                .map_or(text.len(), |(at, _)| at);
+            let whole_word = text[cut..].chars().next().is_none_or(char::is_whitespace);
+            let cut = if whole_word {
+                cut
+            } else {
+                text[..cut].rfind(char::is_whitespace).unwrap_or(0)
+            };
+            &text[..cut]
+        };
+        let part = part.trim();
+        if !part.is_empty() {
+            if !heard.is_empty() {
+                heard.push(' ');
+            }
+            heard.push_str(part);
         }
     }
+    if heard.len() > HEARD_LIMIT {
+        let mut at = heard.len() - HEARD_LIMIT;
+        while !heard.is_char_boundary(at) {
+            at += 1;
+        }
+        heard = heard[at..].to_owned();
+    }
+    heard
+}
+/// Echo can only reach the microphone while output is audible; a paused
+/// output is silent, so the normal start check applies.
+fn strict_start(paused: bool, output_queued: bool, generating: bool) -> bool {
+    !paused && (output_queued || generating)
 }
 pub struct Backend {
     jobs: SyncSender<Job>,
@@ -79,16 +150,13 @@ pub fn test_only_inference() -> anyhow::Result<()> {
         "Turn model produced a non-finite probability"
     );
     let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
-        model: models.tts.model.clone(),
-        tokens: models.tts.tokens.clone(),
-        data_dir: models.tts.data_dir.clone(),
-        num_threads: crate::paths::DEFAULT_TTS_THREADS as i32,
+        dir: models.tts.dir.clone(),
     })?;
     let samples = tts.synth(
         "Hello. The local speech test is complete.",
-        Arc::new(AtomicBool::new(false)),
+        &AtomicBool::new(false),
     )?;
-    anyhow::ensure!(!samples.is_empty(), "Piper produced no samples");
+    anyhow::ensure!(!samples.is_empty(), "Phonon produced no samples");
     let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 16_000)?;
     let mut samples = resampler.process(&samples);
     samples.extend(resampler.flush());
@@ -104,7 +172,7 @@ pub fn test_only_inference() -> anyhow::Result<()> {
         !recognized.rejected && !recognized.text.trim().is_empty(),
         "Whisper rejected synthesized test speech"
     );
-    eprintln!("Test-only headless VAD/turn/Piper/resampling/Whisper inference passed. No device capture/playback was tested.");
+    eprintln!("Test-only headless VAD/turn/Phonon/resampling/Whisper inference passed. No device capture/playback was tested.");
     Ok(())
 }
 
@@ -238,6 +306,15 @@ fn recognize(
     Ok(())
 }
 
+fn endpointing(setting: Option<crate::protocol::EndpointingSetting>) -> turn::Endpointing {
+    match setting {
+        Some(crate::protocol::EndpointingSetting::Patient) => turn::Endpointing::Patient,
+        Some(crate::protocol::EndpointingSetting::Responsive) | None => {
+            turn::Endpointing::Responsive
+        }
+    }
+}
+
 impl Backend {
     pub fn start(settings: Settings, events: SyncSender<Input>) -> Self {
         let (jobs, rx) = mpsc::sync_channel::<Job>(crate::MAX_SPEECH_JOBS);
@@ -257,7 +334,11 @@ impl Backend {
             let result = (|| -> anyhow::Result<()> {
                 let models = crate::paths::check_models()?;
                 ve_asr::silence_logs();
-                let mut detector = turn::TurnDetector::new(&models.vad, &models.turn)?;
+                let mut detector = turn::TurnDetector::new(
+                    &models.vad,
+                    &models.turn,
+                    endpointing(settings.endpointing),
+                )?;
                 let mut asr = ve_asr::WhisperAsr::from_config(ve_asr::AsrConfig {
                     model_path: models.asr.clone(),
                     n_threads: settings
@@ -267,13 +348,7 @@ impl Backend {
                     use_gpu: settings.use_gpu.unwrap_or(cfg!(target_os = "macos")),
                 })?;
                 let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
-                    model: models.tts.model.clone(),
-                    tokens: models.tts.tokens.clone(),
-                    data_dir: models.tts.data_dir.clone(),
-                    num_threads: settings
-                        .tts_threads
-                        .unwrap_or(crate::paths::DEFAULT_TTS_THREADS)
-                        as i32,
+                    dir: models.tts.dir.clone(),
                 })?;
                 let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 48_000)?;
                 let (capture_tx, capture_rx) = mpsc::sync_channel::<(u64, u64, Vec<f32>)>(64);
@@ -309,7 +384,12 @@ impl Backend {
                     ..Default::default()
                 };
                 let audio = Arc::new(ve_audio::AudioIo::start(config.clone())?);
-                state.lock().unwrap().audio = Some(audio.clone());
+                let mut playback = state.lock().unwrap();
+                playback.audio = Some(audio.clone());
+                if playback.paused {
+                    audio.set_paused(true);
+                }
+                drop(playback);
                 // Only this manager owns the microphone stream. Mute drops it;
                 // unmute creates a fresh stream, independently of output/models.
                 let manager_mute = mute.clone();
@@ -343,7 +423,7 @@ impl Backend {
                                             let epoch = manager_epoch.clone();
                                             let muted = manager_mute.clone();
                                             let continuity = manager_continuity.clone();
-                                            Ok(ve_audio::Capture::start(
+                                            ve_audio::Capture::start(
                                                 &config,
                                                 Box::new(move |event| {
                                                     if epoch.load(Ordering::Acquire) == generation
@@ -357,7 +437,7 @@ impl Backend {
                                                         );
                                                     }
                                                 }),
-                                            )?)
+                                            )
                                         },
                                     )
                                 },
@@ -441,8 +521,14 @@ impl Backend {
                             if sequence != continuity {
                                 continue;
                             }
-                            let strict = input_audio.output_queued_frames() > 0
-                                || input_state.lock().unwrap().generation.busy();
+                            let strict = {
+                                let state = input_state.lock().unwrap();
+                                strict_start(
+                                    state.paused,
+                                    input_audio.output_queued_frames() > 0,
+                                    state.generation.busy(),
+                                )
+                            };
                             for event in detector.feed(&frame, strict)? {
                                 match event {
                                     turn::TurnEvent::SpeechStart => {
@@ -515,30 +601,46 @@ impl Backend {
                                 resampler.reset();
                                 joiner.reset();
                             }
-                            let samples = tts.synth(&text, cancel.clone())?;
-                            if cancel.load(Ordering::Acquire) {
+                            {
+                                let mut state = state.lock().unwrap();
+                                if state.generation.allows(epoch, &cancel) {
+                                    record_chunk(&mut state, &text);
+                                }
+                            }
+                            // Stream: each model frame is joined, resampled and queued as soon
+                            // as it exists, so playback starts long before the chunk finishes.
+                            let play = |samples: &[f32]| -> anyhow::Result<()> {
+                                if samples.is_empty() {
+                                    return Ok(());
+                                }
+                                anyhow::ensure!(
+                                    samples.len() <= 48_000 * 28,
+                                    "Joined audio chunk exceeds the bounded playback buffer"
+                                );
+                                // Bound ahead-of-device audio without dropping audio. Cancellation
+                                // remains immediate while waiting for the hardware queue to drain.
+                                while audio.output_queued_frames() > 48_000 * 2
+                                    && !cancel.load(Ordering::Acquire)
+                                {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                let state = state.lock().unwrap();
+                                if state.generation.allows(epoch, &cancel) {
+                                    audio.push_output(samples)?;
+                                }
+                                Ok(())
+                            };
+                            let finish = tts.synth_stream(&text, &cancel, |part| {
+                                let joined = joiner.push_part(part);
+                                play(&resampler.process(&joined))
+                            })?;
+                            if finish == ve_tts::Finish::Cancelled || cancel.load(Ordering::Acquire)
+                            {
+                                joiner.reset();
                                 continue;
                             }
-                            anyhow::ensure!(
-                                samples.len() <= tts.sample_rate() as usize * 30,
-                                "Synthesized chunk exceeded 30 seconds"
-                            );
-                            let samples = resampler.process(&joiner.push(&text, &samples));
-                            anyhow::ensure!(
-                                samples.len() <= 48_000 * 28,
-                                "Joined audio chunk exceeds the bounded playback buffer"
-                            );
-                            // Bound ahead-of-device audio without dropping chunks. Cancellation
-                            // remains immediate while waiting for the hardware queue to drain.
-                            while audio.output_queued_frames() > 48_000 * 2
-                                && !cancel.load(Ordering::Acquire)
-                            {
-                                std::thread::sleep(Duration::from_millis(10));
-                            }
-                            let state = state.lock().unwrap();
-                            if state.generation.allows(epoch, &cancel) {
-                                audio.push_output(&samples)?;
-                            }
+                            let tail = joiner.end_chunk(&text);
+                            play(&resampler.process(&tail))?;
                         }
                         Job::Finish(epoch) => {
                             let finish_token = {
@@ -594,6 +696,26 @@ impl Backend {
         }
     }
 
+    /// Played versus generated milliseconds of the reply since the last cancellation.
+    /// Read before issuing `Action::Cancel`, which starts the next reply's window.
+    pub fn reply_progress(&self) -> Option<(u64, u64)> {
+        let state = self.playback.lock().unwrap();
+        let now = state.audio.as_ref()?.playback_progress();
+        Some((
+            now.played_ms.saturating_sub(state.base.played_ms),
+            now.generated_ms.saturating_sub(state.base.generated_ms),
+        ))
+    }
+
+    /// Heard portion of the current reply for transcripts; `None` when unknown.
+    pub fn heard_text(&self, played_ms: u64, generated_ms: u64) -> Option<String> {
+        let state = self.playback.lock().unwrap();
+        if state.chunks_overflowed || state.chunks.is_empty() {
+            return None;
+        }
+        Some(heard_from_chunks(&state.chunks, played_ms, generated_ms))
+    }
+
     pub fn action(&self, action: Action, epoch: u64) -> anyhow::Result<()> {
         match action {
             Action::Cancel => {
@@ -602,7 +724,11 @@ impl Backend {
                 state.generation.cancel(epoch);
                 if let Some(audio) = &state.audio {
                     audio.flush_output();
+                    state.base = audio.playback_progress();
                 }
+                state.chunks.clear();
+                state.chunk_bytes = 0;
+                state.chunks_overflowed = false;
             }
             Action::UserActivity(id) => self
                 .playback
@@ -642,6 +768,13 @@ impl Backend {
             Action::Finish => {
                 if self.jobs.try_send(Job::Finish(epoch)).is_err() {
                     self.pending_finish.store(epoch, Ordering::Release);
+                }
+            }
+            Action::Pause(on) => {
+                let mut state = self.playback.lock().unwrap();
+                state.paused = on;
+                if let Some(audio) = &state.audio {
+                    audio.set_paused(on);
                 }
             }
         }
@@ -846,6 +979,54 @@ mod tests {
         assert!(backend.can_drain(epoch));
         assert!(!backend.playback.lock().unwrap().generation.busy());
     }
+    #[test]
+    fn heard_text_covers_played_chunks_and_a_word_aligned_partial() {
+        let chunks = vec![
+            ("One two.".to_owned(), 0),
+            ("Three four five six.".to_owned(), 1000),
+        ];
+        assert_eq!(heard_from_chunks(&chunks, 500, 3000), "One");
+        assert_eq!(heard_from_chunks(&chunks, 1000, 3000), "One two.");
+        assert_eq!(
+            heard_from_chunks(&chunks, 2000, 3000),
+            "One two. Three four"
+        );
+        assert_eq!(
+            heard_from_chunks(&chunks, 3000, 3000),
+            "One two. Three four five six."
+        );
+        assert_eq!(heard_from_chunks(&chunks, 0, 3000), "");
+    }
+    #[test]
+    fn heard_text_is_bounded_to_the_newest_bytes() {
+        let chunks = vec![("é".repeat(HEARD_LIMIT), 0)];
+        let heard = heard_from_chunks(&chunks, 10, 10);
+        assert!(heard.len() <= HEARD_LIMIT && heard.chars().all(|c| c == 'é'));
+    }
+    #[test]
+    fn barge_in_start_check_is_not_strict_while_paused() {
+        assert!(strict_start(false, true, false));
+        assert!(strict_start(false, false, true));
+        assert!(!strict_start(false, false, false));
+        assert!(!strict_start(true, true, true));
+    }
+    #[test]
+    fn pause_before_the_device_opens_is_remembered() {
+        let (jobs, _rx) = mpsc::sync_channel(1);
+        let backend = Backend {
+            jobs,
+            playback: Arc::new(Mutex::new(Playback::default())),
+            muted: Arc::new(AtomicBool::new(false)),
+            capture_epoch: Arc::new(AtomicU64::new(0)),
+            health: Arc::new(AtomicBool::new(false)),
+            pending_finish: Arc::new(AtomicU64::new(0)),
+        };
+        backend.action(Action::Pause(true), 1).unwrap();
+        assert!(backend.playback.lock().unwrap().paused);
+        backend.action(Action::Pause(false), 1).unwrap();
+        assert!(!backend.playback.lock().unwrap().paused);
+    }
+
     #[test]
     fn dropped_capture_frames_are_detected_before_assembling_more_audio() {
         let mut last = 0;

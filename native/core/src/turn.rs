@@ -7,6 +7,11 @@ use std::collections::VecDeque;
 /// 16 kHz mono frame size the VAD consumes (32 ms).
 pub const VAD_FRAME: usize = 512;
 const SR: usize = 16_000;
+/// Strict barge-in guard (also the pre-roll length, ~480 ms): consecutive frames at
+/// p > 0.85 while we are speaking. Deliberately conservative until acoustic echo
+/// cancellation exists; do not lower it before AEC lands, or playback bleeding into
+/// the mic will interrupt the reply. Pre-roll is exactly the trigger window, so a
+/// quieter onset that preceded it (p <= 0.85) is not kept.
 const BARGE_FRAMES: usize = 15;
 const MAX_CAPTURE_SECONDS: usize = 120;
 
@@ -57,6 +62,26 @@ fn candidate_start(
         *strict_run >= BARGE_FRAMES as u32
     } else {
         *run >= start_frames
+    }
+}
+
+/// How long the detector waits in silence before ending the user's turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Endpointing {
+    /// ~256 ms of silence before consulting Smart Turn; hard stop at ~1.9 s.
+    #[default]
+    Responsive,
+    /// ~640 ms before consulting Smart Turn; hard stop at ~3 s.
+    Patient,
+}
+
+impl Endpointing {
+    /// (min_silence, max_silence) in 32 ms VAD frames.
+    fn silence_frames(self) -> (u32, u32) {
+        match self {
+            Self::Responsive => (8, 60),
+            Self::Patient => (20, 94),
+        }
     }
 }
 
@@ -126,11 +151,15 @@ struct TurnState {
 }
 
 impl TurnDetector {
-    pub fn new(vad_model: &std::path::Path, turn_model: &std::path::Path) -> anyhow::Result<Self> {
+    pub fn new(
+        vad_model: &std::path::Path,
+        turn_model: &std::path::Path,
+        endpointing: Endpointing,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             vad: ve_vad::SileroVad::from_model(vad_model)?,
             turn: ve_turn::SmartTurn::from_model(turn_model)?,
-            state: TurnState::default(),
+            state: TurnState::with_endpointing(endpointing),
         })
     }
 
@@ -180,6 +209,15 @@ impl Default for TurnState {
 }
 
 impl TurnState {
+    fn with_endpointing(endpointing: Endpointing) -> Self {
+        let (min_silence, max_silence) = endpointing.silence_frames();
+        Self {
+            min_silence,
+            max_silence,
+            ..Self::default()
+        }
+    }
+
     fn reset(&mut self, scores: &mut impl Scores) {
         self.in_speech = false;
         self.buf.clear();
@@ -582,5 +620,53 @@ mod tests {
         push_pre(&mut pre, vec![99.0; VAD_FRAME]);
         assert_eq!(pre.len(), BARGE_FRAMES);
         assert_eq!(pre.front().unwrap()[0], 1.0);
+    }
+    #[test]
+    fn barge_in_utterance_keeps_the_whole_strict_trigger_window() {
+        let mut f = Fixture::new(&[0.9]);
+        assert!(f.frames(30, 0.0, true).is_empty());
+        assert_eq!(f.frames(BARGE_FRAMES, 0.9, true), [TurnEvent::SpeechStart]);
+        let events = f.frames(8, 0.0, true);
+        let [TurnEvent::Utterance { audio, .. }] = events.as_slice() else {
+            panic!("expected utterance");
+        };
+        // The ~480 ms that tripped the guard are all sent to ASR; earlier silence is not.
+        assert!(audio[..BARGE_FRAMES * VAD_FRAME].iter().all(|s| *s == 0.9));
+        assert_eq!(audio.len(), (BARGE_FRAMES + 8) * VAD_FRAME);
+    }
+    #[test]
+    fn normal_start_preroll_keeps_quiet_audio_before_the_trigger() {
+        let mut f = Fixture::new(&[0.9]);
+        assert!(f.frames(6, 0.2, false).is_empty());
+        assert_eq!(f.frames(5, 0.9, false), [TurnEvent::SpeechStart]);
+        f.frames(5, 0.9, false);
+        f.frames(7, 0.0, false);
+        let events = f.frames(1, 0.0, false);
+        let [TurnEvent::Utterance { audio, .. }] = events.as_slice() else {
+            panic!("expected utterance");
+        };
+        assert_eq!(audio[0], 0.2);
+        assert_eq!(audio.iter().filter(|s| **s == 0.2).count(), 6 * VAD_FRAME);
+    }
+    #[test]
+    fn patient_endpointing_waits_longer_than_responsive() {
+        let silence_until_check = |endpointing| {
+            let mut f = Fixture::new(&[0.9]);
+            f.state = TurnState::with_endpointing(endpointing);
+            assert_eq!(f.frames(13, 0.9, false), [TurnEvent::SpeechStart]);
+            f.frames(8, 0.9, false);
+            let mut n = 0;
+            while f.frames(1, 0.0, false).is_empty() {
+                n += 1;
+            }
+            n + 1
+        };
+        assert_eq!(silence_until_check(Endpointing::Responsive), 8);
+        assert_eq!(silence_until_check(Endpointing::Patient), 20);
+        assert_eq!(Endpointing::default(), Endpointing::Responsive);
+        assert_eq!(
+            Endpointing::Patient.silence_frames().1 as usize * VAD_FRAME,
+            94 * 512
+        );
     }
 }

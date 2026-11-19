@@ -28,14 +28,31 @@ pub struct Roles {
 #[serde(deny_unknown_fields)]
 pub struct Asset {
     pub id: String,
+    /// Single-artifact assets (`file`, `tar.bz2`) pin one URL; `files` assets pin each member.
+    #[serde(default)]
     pub file: String,
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
     pub bytes: u64,
     pub format: Format,
     #[serde(default)]
+    pub files: Vec<AssetFile>,
+    #[serde(default)]
     pub install: Option<Install>,
     pub runtime: RuntimeAsset,
+}
+
+/// One independently pinned member of a `files` asset, installed under `runtime.path`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetFile {
+    pub path: String,
+    pub url: String,
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -44,6 +61,9 @@ pub enum Format {
     File,
     #[serde(rename = "tar.bz2")]
     TarBz2,
+    /// A directory of individually pinned files.
+    #[serde(rename = "files")]
+    Files,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,14 +116,62 @@ impl Inventory {
         let mut ids = HashSet::new();
         for asset in &self.assets {
             ensure!(ids.insert(asset.id.as_str()), "Duplicate asset id");
+            ensure!(safe_component(&asset.id), "Invalid asset id");
+            if asset.format == Format::Files {
+                ensure!(
+                    asset.file.is_empty()
+                        && asset.url.is_empty()
+                        && asset.sha256.is_empty()
+                        && asset.bytes == 0
+                        && asset.install.is_none(),
+                    "Files asset {} pins only its members",
+                    asset.id
+                );
+                ensure!(
+                    !asset.files.is_empty() && asset.files.len() <= MAX_ASSET_FILES,
+                    "Files asset {} has an invalid member count",
+                    asset.id
+                );
+                let mut names = HashSet::new();
+                let mut total = 0u64;
+                for member in &asset.files {
+                    ensure!(
+                        safe_component(&member.path) && names.insert(member.path.as_str()),
+                        "Invalid or duplicate member path in asset {}",
+                        asset.id
+                    );
+                    ensure!(
+                        member.url.starts_with("https://")
+                            && valid_pin(&member.sha256, member.bytes),
+                        "Invalid pin for {}/{}",
+                        asset.id,
+                        member.path
+                    );
+                    total = total.saturating_add(member.bytes);
+                }
+                ensure!(
+                    total <= MAX_ASSET_BYTES,
+                    "Files asset {} exceeds the size limit",
+                    asset.id
+                );
+                ensure!(
+                    safe_component(&asset.runtime.path),
+                    "Files asset {} runtime path must be one directory name",
+                    asset.id
+                );
+                ensure!(
+                    asset.runtime.tokens.is_none() && asset.runtime.data_dir.is_none(),
+                    "Files asset {} declares no tokens or data directory",
+                    asset.id
+                );
+                continue;
+            }
             ensure!(
-                safe_component(&asset.id) && safe_component(&asset.file),
+                asset.files.is_empty() && safe_component(&asset.file),
                 "Invalid asset id/file"
             );
             ensure!(
-                asset.bytes > 0
-                    && asset.sha256.len() == 64
-                    && asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+                valid_pin(&asset.sha256, asset.bytes),
                 "Invalid compiled asset digest/size"
             );
             ensure!(
@@ -126,6 +194,7 @@ impl Inventory {
                 );
             }
             match asset.format {
+                Format::Files => unreachable!("handled before the single-artifact checks"),
                 Format::File => {
                     ensure!(
                         asset.install.is_none(),
@@ -182,8 +251,8 @@ impl Inventory {
                 .with_context(|| format!("Inventory role {role} references unknown asset {id}"))?;
             if role == "tts" {
                 ensure!(
-                    asset.tokens_path().is_some() && asset.data_dir().is_some(),
-                    "Inventory TTS asset {id} must declare tokens and dataDir"
+                    asset.format == Format::Files,
+                    "Inventory TTS asset {id} must be a files directory"
                 );
             }
         }
@@ -205,6 +274,13 @@ impl Inventory {
         self.asset(id)
             .with_context(|| format!("Inventory role {role} references unknown asset {id}"))
     }
+}
+
+const MAX_ASSET_FILES: usize = 32;
+const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+
+fn valid_pin(sha256: &str, bytes: u64) -> bool {
+    bytes > 0 && sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn safe_component(value: &str) -> bool {
@@ -246,11 +322,28 @@ mod tests {
         let inventory = Inventory::load().unwrap();
         assert_eq!(inventory.assets.len(), 4);
         assert_eq!(inventory.role_asset("vad").unwrap().id, "silero-vad");
-        assert_eq!(inventory.role_asset("tts").unwrap().id, "piper-lessac");
-        assert!(inventory
-            .assets
-            .iter()
-            .all(|asset| asset.url.starts_with("https://") && asset.bytes > 0));
+        let tts = inventory.role_asset("tts").unwrap();
+        assert_eq!(tts.id, "phonon-31m-en");
+        assert_eq!(tts.format, Format::Files);
+        for name in [
+            "config.json",
+            "tokenizer.json",
+            "model.q8.gguf",
+            "default-voice.safetensors",
+            "LICENSE",
+        ] {
+            assert!(tts.files.iter().any(|file| file.path == name), "{name}");
+        }
+        assert!(inventory.assets.iter().all(|asset| {
+            if asset.format == Format::Files {
+                asset
+                    .files
+                    .iter()
+                    .all(|f| f.url.starts_with("https://") && f.bytes > 0)
+            } else {
+                asset.url.starts_with("https://") && asset.bytes > 0
+            }
+        }));
     }
 
     #[test]
@@ -264,6 +357,48 @@ mod tests {
         ] {
             assert!(!safe_relative(path), "{path}");
         }
+    }
+
+    fn parse(json: &str) -> Result<Inventory> {
+        let inventory: Inventory = serde_json::from_str(json)?;
+        inventory.validate()?;
+        Ok(inventory)
+    }
+
+    fn with_tts(files: &str) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(INVENTORY).unwrap();
+        let tts = value["assets"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|asset| asset["id"] == "phonon-31m-en")
+            .unwrap();
+        tts["files"] = serde_json::from_str(files).unwrap();
+        value.to_string()
+    }
+
+    #[test]
+    fn files_assets_reject_unsafe_duplicate_insecure_and_unpinned_members() {
+        let pin = "0".repeat(64);
+        let member = |path: &str, url: &str, sha: &str, bytes: u64| {
+            format!(r#"[{{"path":"{path}","url":"{url}","sha256":"{sha}","bytes":{bytes}}}]"#)
+        };
+        assert!(parse(&with_tts(&member("a.bin", "https://x.example/a", &pin, 1))).is_ok());
+        for bad in [
+            member("../a.bin", "https://x.example/a", &pin, 1),
+            member("dir/a.bin", "https://x.example/a", &pin, 1),
+            member("a.bin", "http://x.example/a", &pin, 1),
+            member("a.bin", "https://x.example/a", "abc", 1),
+            member("a.bin", "https://x.example/a", &pin, 0),
+            member("a.bin", "https://x.example/a", &pin, MAX_ASSET_BYTES + 1),
+            "[]".to_string(),
+        ] {
+            assert!(parse(&with_tts(&bad)).is_err(), "{bad}");
+        }
+        let duplicate = format!(
+            r#"[{{"path":"a","url":"https://x.example/a","sha256":"{pin}","bytes":1}},{{"path":"a","url":"https://x.example/b","sha256":"{pin}","bytes":1}}]"#
+        );
+        assert!(parse(&with_tts(&duplicate)).is_err());
     }
 
     #[test]
