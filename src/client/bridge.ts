@@ -29,14 +29,23 @@ export interface Interruption {
 }
 /** One line of the live conversation, kept by the bridge so surfaces never depend on host caches. */
 export interface TranscriptEntry {
-  role: "user" | "assistant";
+  /** `note` is the engine's own remark, such as why an agent chat ended. */
+  role: "user" | "assistant" | "note";
   text: string;
   /** Roster index of the agent that spoke (assistant) or was addressed (user). */
   agent?: number;
   /** Display name of that agent. */
   speaker?: string;
+  /** Name of the agent this reply was handed to, when an agent addressed another agent. */
+  to?: string;
 }
 export const TRANSCRIPT_LIMIT = 50;
+/** Shown in the transcript when the engine refuses another agent-to-agent hand-off. */
+export const CHAIN_END_NOTES = {
+  turns: "Agent chat ended: turn limit reached. Back to you.",
+  time: "Agent chat ended: time limit reached. Back to you.",
+  ping_pong: "Agent chat ended: the agents were going back and forth. Back to you.",
+} as const;
 /** What an agent is told about the other voices: a few short lines, never the conversation. */
 export const DIGEST_LINES = 6;
 export const DIGEST_LINE_CHARS = 160;
@@ -90,6 +99,8 @@ interface Lane {
 interface Turn {
   lane: Lane;
   number: number;
+  /** Who authored it: the user's own speech, or another agent's relayed line. */
+  origin: "user" | "agent";
   inboxID?: string;
   delivered: boolean;
   deliveryDone: Promise<void>;
@@ -139,15 +150,33 @@ export const isStoppedError = (error: unknown): error is Error =>
  * conversation), each clipped, under one byte budget. Empty when nobody else spoke.
  * The user's own lines count as "others" when they were addressed to a different agent.
  */
-export function digestPrefix(entries: readonly TranscriptEntry[], agent: number): string {
+export function digestPrefix(
+  entries: readonly TranscriptEntry[],
+  agent: number,
+  name?: string,
+): string {
   const lines = entries
-    .filter((entry) => entry.agent !== undefined && entry.agent !== agent && entry.speaker)
+    // Lines already handed to this agent arrive as its own prompt, so they are not repeated.
+    .filter(
+      (entry) =>
+        entry.role !== "note" &&
+        entry.agent !== undefined &&
+        entry.agent !== agent &&
+        entry.speaker &&
+        (name === undefined || entry.to !== name),
+    )
     .slice(-DIGEST_LINES)
     .map((entry) => {
       const flat = entry.text.replace(/\s+/gu, " ").trim();
       const text =
         flat.length > DIGEST_LINE_CHARS ? `${flat.slice(0, DIGEST_LINE_CHARS - 1)}…` : flat;
-      return `- ${entry.role === "user" ? `User to ${entry.speaker}` : entry.speaker}: ${text}`;
+      const who =
+        entry.role === "user"
+          ? `User to ${entry.speaker}`
+          : entry.to
+            ? `${entry.speaker} to ${entry.to}`
+            : entry.speaker;
+      return `- ${who}: ${text}`;
     });
   while (lines.length && Buffer.byteLength(lines.join("\n")) > DIGEST_BYTES) lines.shift();
   if (!lines.length) return "";
@@ -293,7 +322,7 @@ export function createBridge(options: BridgeOptions) {
   };
   let cutOff: Interruption | null = null;
   const transcript: TranscriptEntry[] = [];
-  const record = (role: TranscriptEntry["role"], text: string, lane?: Lane) => {
+  const record = (role: TranscriptEntry["role"], text: string, lane?: Lane, to?: string) => {
     const clipped = clippedUtf8(text, TRANSCRIPT_TEXT_BYTES);
     const line = clipped.truncated ? `${clipped.text.trimEnd()}…` : clipped.text.trim();
     if (!line) return;
@@ -301,6 +330,7 @@ export function createBridge(options: BridgeOptions) {
       role,
       text: line,
       ...(lane ? { agent: lane.index, speaker: lane.participant.name } : {}),
+      ...(to ? { to } : {}),
     });
     if (transcript.length > TRANSCRIPT_LIMIT)
       transcript.splice(0, transcript.length - TRANSCRIPT_LIMIT);
@@ -327,6 +357,11 @@ export function createBridge(options: BridgeOptions) {
     if (!current) return;
     active = undefined;
     send({ type: "turn_end", turn: current.number, reason });
+    // The authority of a user turn ends with the turn; ordered with the next prompt's grant.
+    if (!closed && current.lane.sessionID) {
+      const supervisorID = current.lane.sessionID;
+      void serialize(() => grantOrigin(supervisorID, "none"));
+    }
     if (!current.cancelled && current.inboxID) retireInbox(current.lane, current.inboxID);
   };
   const stop = (): Promise<void> => {
@@ -768,6 +803,17 @@ export function createBridge(options: BridgeOptions) {
     });
     return lane.starting;
   };
+  /** Tell the server who authored the turn a supervisor session is about to answer. */
+  const grantOrigin = async (supervisorID: string, origin: "user" | "agent" | "none") => {
+    if (closed) return;
+    try {
+      await rpc.turn({ supervisorID, origin }, { ...request, signal: requestOptions().signal });
+    } catch (error) {
+      // Without the grant the session simply cannot reassign followed sessions this turn.
+      if (origin !== "none" && !closed)
+        options.onError(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
   const submit = async (turn: Turn, text: string) => {
     const lane = turn.lane;
     try {
@@ -784,6 +830,8 @@ export function createBridge(options: BridgeOptions) {
     if (closed || turn.cancelled || !lane.sessionID) return;
     lane.pendingPrompt = turn;
     try {
+      await grantOrigin(lane.sessionID, turn.origin);
+      if (closed || turn.cancelled) return;
       const delivery = lane.queueNextPrompt ? ("queue" as const) : undefined;
       lane.queueNextPrompt = false;
       const result = await client.session.prompt(
@@ -895,14 +943,32 @@ export function createBridge(options: BridgeOptions) {
         return;
       }
       lastTurn = message.turn;
-      if (cutOff) {
-        cutOff = null;
+      const from = message.from ? lanes.find((c) => c.participant.id === message.from) : undefined;
+      let text: string;
+      if (from) {
+        // Another agent's completed reply addressed this one: no user activity, no new
+        // generation. The speaker's own transcript line is marked as handed over.
+        for (let i = transcript.length - 1; i >= 0; i--) {
+          const entry = transcript[i]!;
+          if (entry.role === "assistant" && entry.agent === from.index) {
+            entry.to = lane.participant.name;
+            break;
+          }
+        }
         changed();
+        text =
+          digestPrefix(transcript, lane.index, lane.participant.name) +
+          `[${from.participant.name} → ${lane.participant.name}]: ${message.text}`;
+      } else {
+        if (cutOff) {
+          cutOff = null;
+          changed();
+        }
+        newActivity();
+        // The digest is built from what the others said before this line is recorded.
+        text = digestPrefix(transcript, lane.index, lane.participant.name) + message.text;
+        record("user", message.text, lane);
       }
-      newActivity();
-      // The digest is built from what the others said before this line is recorded.
-      const text = digestPrefix(transcript, lane.index) + message.text;
-      record("user", message.text, lane);
       let resolveDelivery!: () => void;
       const deliveryDone = new Promise<void>((resolve) => {
         resolveDelivery = resolve;
@@ -910,6 +976,7 @@ export function createBridge(options: BridgeOptions) {
       const current: Turn = {
         lane,
         number: message.turn,
+        origin: from ? "agent" : "user",
         delivered: false,
         deliveryDone,
         resolveDelivery,
@@ -922,6 +989,9 @@ export function createBridge(options: BridgeOptions) {
       };
       active = current;
       void serialize(() => submit(current, text));
+    }
+    if (message.type === "chain_end") {
+      record("note", CHAIN_END_NOTES[message.reason]);
     }
     if (message.type === "interrupt" && active?.number === message.turn && active.lane.sessionID) {
       const interrupted = active;
@@ -953,7 +1023,7 @@ export function createBridge(options: BridgeOptions) {
           (signal) => rpc.hello(undefined, { ...request, signal }),
           abort.signal,
         );
-        if (hello.protocol !== 2) throw new Error("Converse server protocol mismatch");
+        if (hello.protocol !== 3) throw new Error("Converse server protocol mismatch");
         if (closed) return;
         const result = await rpc.start(undefined, {
           ...request,

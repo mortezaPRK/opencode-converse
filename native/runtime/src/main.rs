@@ -1,6 +1,7 @@
 mod addressing;
 #[cfg(feature = "native-audio")]
 mod audio;
+mod chain;
 mod controller;
 mod generation;
 mod inventory;
@@ -439,6 +440,7 @@ fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
                 if let Some(participants) = settings.participants.clone() {
                     controller.set_roster(participants);
                 }
+                controller.agent_chat = settings.agent_chat_enabled();
                 if mode == Mode::Fixture {
                     controller.ready(&mut out, &mut actions);
                     controller.hearing(1, &mut out, &mut actions);
@@ -632,6 +634,7 @@ mod tests {
             turn: 1,
             speaker: "a1".into(),
             addressed: false,
+            from: None,
             text: "\u{1}".repeat(protocol::MAX_TEXT_BYTES),
         };
         let mut output = vec![];
@@ -641,6 +644,7 @@ mod tests {
             turn: 1,
             speaker: "a1".into(),
             addressed: false,
+            from: None,
             text: "quotes \\\" ".repeat(10_000),
         };
         write_message(&mut output, &message).unwrap();

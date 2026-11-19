@@ -1,3 +1,4 @@
+use crate::chain::{Chain, Limits};
 use crate::protocol::{Engine, Host, Participant, Reason, Status, MAX_TEXT_BYTES};
 use crate::speech::Speech;
 use std::collections::{HashSet, VecDeque};
@@ -77,6 +78,14 @@ pub struct Controller {
     queue: VecDeque<Queued>,
     queue_bytes: usize,
     status_speaker: Option<usize>,
+    /// Agents may hand the floor to each other. Set once from the init settings.
+    pub agent_chat: bool,
+    /// Budget for the agent-to-agent chain started by the current user turn. `None` when no
+    /// user turn is in flight or the chain was cut (user speech, mute, failure).
+    chain: Option<Chain>,
+    limits: Limits,
+    /// The last complete reply of the current turn: who said it and what, for hand-offs.
+    last_final: Option<(usize, String)>,
 }
 
 impl Default for Controller {
@@ -107,6 +116,10 @@ impl Default for Controller {
             queue: VecDeque::new(),
             queue_bytes: 0,
             status_speaker: None,
+            agent_chat: true,
+            chain: None,
+            limits: Limits::default(),
+            last_final: None,
         }
     }
 }
@@ -255,6 +268,12 @@ impl Controller {
         self.announcements.clear();
         self.announcing = false;
     }
+    /// User speech, mute, failure and shutdown all end the agent-to-agent chain. A reply that
+    /// merely supersedes another inside one turn does not.
+    fn end_chain(&mut self) {
+        self.chain = None;
+        self.last_final = None;
+    }
     fn schedule_announcement(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         if !self.ready
             || self.muted
@@ -295,6 +314,7 @@ impl Controller {
             return;
         }
         self.invalidate_announcements();
+        self.end_chain();
         if self.active {
             out.push(Engine::Interrupt {
                 turn: self.turn,
@@ -338,6 +358,9 @@ impl Controller {
         self.speaking_as = resolved.index;
         self.turn += 1;
         self.active = true;
+        self.last_final = None;
+        self.chain = (self.agent_chat && self.roster.len() > 1)
+            .then(|| Chain::new(Instant::now(), self.limits));
         self.ack_armed = self.ack_enabled.then(Instant::now);
         self.finished.clear();
         self.speech_chunks = 0;
@@ -347,6 +370,7 @@ impl Controller {
             speaker: self.id_of(resolved.index),
             addressed: resolved.addressed,
             text: resolved.text,
+            from: None,
         });
         self.status(Status::Thinking, out);
     }
@@ -376,6 +400,7 @@ impl Controller {
                 self.hearing = None;
                 if on {
                     self.invalidate_announcements();
+                    self.end_chain();
                     if self.active {
                         out.push(Engine::Interrupt {
                             turn: self.turn,
@@ -448,6 +473,7 @@ impl Controller {
             Host::TurnEnd { turn, reason } => {
                 if reason == Reason::Disconnected {
                     self.invalidate_announcements();
+                    self.end_chain();
                     self.cancel(actions);
                     self.active = false;
                     self.hearing = None;
@@ -456,6 +482,7 @@ impl Controller {
                 }
                 if reason != Reason::Completed && turn == self.turn && self.active {
                     self.invalidate_announcements();
+                    self.end_chain();
                     self.cancel(actions);
                     self.active = false;
                     self.rest(out);
@@ -467,11 +494,15 @@ impl Controller {
                 if reason == Reason::Completed {
                     self.ack_armed = None;
                     if let Some(reply) = self.reply.take() {
+                        if self.last_final.is_none() && !reply.raw.trim().is_empty() {
+                            self.last_final = Some((reply.speaker, clip(&reply.raw, 8192).into()));
+                        }
                         self.finish_reply(reply, out, actions);
                     }
                     actions.push(Action::Finish);
                 } else {
                     self.invalidate_announcements();
+                    self.end_chain();
                     self.cancel(actions);
                 }
                 self.active = false;
@@ -480,11 +511,15 @@ impl Controller {
                 } else if !self.playing {
                     let _ = self.promote(out, actions);
                 }
+                if reason == Reason::Completed {
+                    self.relay(out, actions);
+                }
             }
             Host::PromptFailed { turn, message } => {
                 let _ = message; // Host failure details may contain transcript content. Never log.
                 if self.active && turn == self.turn {
                     self.invalidate_announcements();
+                    self.end_chain();
                     self.cancel(actions);
                     self.active = false;
                     self.rest(out);
@@ -492,11 +527,62 @@ impl Controller {
             }
             Host::Shutdown {} => {
                 self.invalidate_announcements();
+                self.end_chain();
                 self.cancel(actions);
             }
             Host::Init { .. } => return Err("init is only valid once"),
         }
         Ok(())
+    }
+    /// The turn that just completed ended with a reply addressed to another agent: hand the
+    /// floor over, if the chain budget allows. The next agent's prompt is a new controller turn,
+    /// so floor, queue, interruption and status all work exactly as for a user turn. Announcements
+    /// never reach this path because they are not turn replies.
+    fn relay(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+        let Some((from, text)) = self.last_final.take() else {
+            return;
+        };
+        if !self.agent_chat || self.chain.is_none() || self.muted || self.hearing.is_some() {
+            return;
+        }
+        let resolved = crate::addressing::resolve(&self.roster, &text);
+        // Talking to yourself, to nobody, or to a name that is not on the roster ends the chain.
+        if !resolved.addressed || resolved.index == from {
+            self.chain = None;
+            return;
+        }
+        let to = resolved.index;
+        let verdict = self
+            .chain
+            .as_mut()
+            .map(|chain| chain.admit(Instant::now(), from, to));
+        if let Some(Err(reason)) = verdict {
+            self.chain = None;
+            out.push(Engine::ChainEnd {
+                turn: self.turn,
+                reason: reason.as_str(),
+            });
+            return;
+        }
+        self.turn += 1;
+        self.active = true;
+        self.addressee = to;
+        self.finished.clear();
+        self.ack_armed = None;
+        if !self.playing {
+            // The previous turn already finished its generation; start a fresh one.
+            self.push_cancel(actions);
+            self.speech_chunks = 0;
+            self.speech_clipped = false;
+            self.status(Status::Thinking, out);
+        }
+        out.push(Engine::Prompt {
+            turn: self.turn,
+            speaker: self.id_of(to),
+            addressed: true,
+            text: resolved.text,
+            from: Some(self.id_of(from)),
+        });
     }
     fn finish_reply(&mut self, mut reply: Reply, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         self.speak(reply.speech.push("", true), false, out, actions);
@@ -573,6 +659,9 @@ impl Controller {
             || self.finished.contains(&id)
         {
             return Ok(());
+        }
+        if final_ {
+            self.last_final = Some((speaker, clip(&text, 8192).to_owned()));
         }
         if self.floor_holder().is_some_and(|holder| holder != speaker) {
             self.enqueue(Queued {
@@ -1396,5 +1485,233 @@ mod tests {
                 &mut a
             )
             .is_err());
+    }
+    // ---- agent-to-agent chains ----
+
+    fn finals(c: &mut Controller, turn: u64, speaker: &str, reply: &str, text: &str) {
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::ReplyEnd {
+                turn,
+                speaker: speaker.into(),
+                reply: reply.into(),
+                text: text.into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+    }
+    fn end_turn(c: &mut Controller, turn: u64) -> (Vec<Engine>, Vec<Action>) {
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::TurnEnd {
+                turn,
+                reason: Reason::Completed,
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        (out, a)
+    }
+    fn relayed(out: &[Engine]) -> Option<(u64, &str, &str, &str)> {
+        out.iter().find_map(|e| match e {
+            Engine::Prompt {
+                turn,
+                speaker,
+                text,
+                from: Some(from),
+                ..
+            } => Some((*turn, from.as_str(), speaker.as_str(), text.as_str())),
+            _ => None,
+        })
+    }
+    fn chain_end(out: &[Engine]) -> Option<&'static str> {
+        out.iter().find_map(|e| match e {
+            Engine::ChainEnd { reason, .. } => Some(*reason),
+            _ => None,
+        })
+    }
+    /// One agent turn: reply, finish the turn, return what the engine emitted.
+    fn agent_turn(c: &mut Controller, turn: u64, speaker: &str, text: &str) -> Vec<Engine> {
+        finals(c, turn, speaker, &format!("r{turn}"), text);
+        end_turn(c, turn).0
+    }
+
+    #[test]
+    fn a_reply_addressed_to_another_agent_is_relayed_as_a_new_turn() {
+        let mut c = team();
+        prompt(&mut c, "Ada, what do you think?");
+        let out = agent_turn(&mut c, 1, "a1", "Grace, can you check the build?");
+        assert_eq!(
+            relayed(&out),
+            Some((2, "a1", "a2", "can you check the build?"))
+        );
+        // The relay is a normal turn: Grace's reply queues behind Ada's audio, then speaks
+        // in her own voice once the floor frees.
+        finals(&mut c, 2, "a2", "r2", "It is green.");
+        let mut out = vec![];
+        let mut a = vec![];
+        c.drained(&mut out, &mut a);
+        assert!(a.contains(&Action::Voice("easton".into())));
+        assert!(a.contains(&Action::Speak("It is green.".into())));
+    }
+
+    #[test]
+    fn trailing_vocatives_relay_too() {
+        let mut c = team();
+        prompt(&mut c, "Ada, hello");
+        let out = agent_turn(&mut c, 1, "a1", "Can you take this one, Linus?");
+        assert_eq!(
+            relayed(&out),
+            Some((2, "a1", "a3", "Can you take this one"))
+        );
+    }
+
+    #[test]
+    fn four_agent_turns_then_the_chain_ends_with_a_reason() {
+        let mut c = team();
+        prompt(&mut c, "Ada, go");
+        assert!(relayed(&agent_turn(&mut c, 1, "a1", "Grace, your move.")).is_some());
+        assert!(relayed(&agent_turn(&mut c, 2, "a2", "Linus, your move.")).is_some());
+        assert!(relayed(&agent_turn(&mut c, 3, "a3", "Ada, your move.")).is_some());
+        let out = agent_turn(&mut c, 4, "a1", "Grace, again.");
+        assert!(relayed(&out).is_none());
+        assert_eq!(chain_end(&out), Some("turns"));
+        assert!(!c.active);
+        // A new user turn starts a fresh budget.
+        prompt(&mut c, "Ada, go again");
+        let turn = c.turn;
+        assert!(relayed(&agent_turn(&mut c, turn, "a1", "Grace, your move.")).is_some());
+    }
+
+    #[test]
+    fn the_wall_clock_cap_ends_the_chain() {
+        let mut c = team();
+        prompt(&mut c, "Ada, go");
+        c.chain.as_mut().unwrap().started =
+            Instant::now() - crate::chain::MAX_WALL - Duration::from_secs(1);
+        let out = agent_turn(&mut c, 1, "a1", "Grace, your move.");
+        assert!(relayed(&out).is_none());
+        assert_eq!(chain_end(&out), Some("time"));
+    }
+
+    #[test]
+    fn ping_pong_between_a_pair_is_limited() {
+        let mut c = team();
+        c.limits = Limits {
+            turns: 99,
+            ..Limits::default()
+        };
+        prompt(&mut c, "Ada, go");
+        let mut turn = 1;
+        for i in 0..4 {
+            let (speaker, text) = if i % 2 == 0 {
+                ("a1", "Grace, you.")
+            } else {
+                ("a2", "Ada, you.")
+            };
+            let out = agent_turn(&mut c, turn, speaker, text);
+            assert!(relayed(&out).is_some(), "hop {i}");
+            turn += 1;
+        }
+        let out = agent_turn(&mut c, turn, "a1", "Grace, you.");
+        assert_eq!(chain_end(&out), Some("ping_pong"));
+    }
+
+    #[test]
+    fn self_address_unknown_names_and_plain_replies_never_relay() {
+        for text in [
+            "Ada, I will do it myself.",
+            "Zed, can you check?",
+            "The build is green.",
+            "Let me ask Grace to check it.",
+        ] {
+            let mut c = team();
+            prompt(&mut c, "Ada, go");
+            let out = agent_turn(&mut c, 1, "a1", text);
+            assert!(relayed(&out).is_none(), "{text}");
+            assert!(chain_end(&out).is_none(), "{text}");
+            assert!(!c.active, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_user_turn_to_a_single_agent_or_with_chat_off_never_relays() {
+        let mut c = Controller::default();
+        c.ready(&mut vec![], &mut vec![]);
+        prompt(&mut c, "hello");
+        assert!(relayed(&agent_turn(&mut c, 1, "a1", "Grace, hi.")).is_none());
+        let mut c = team();
+        c.agent_chat = false;
+        prompt(&mut c, "Ada, go");
+        let out = agent_turn(&mut c, 1, "a1", "Grace, your move.");
+        assert!(relayed(&out).is_none() && chain_end(&out).is_none());
+    }
+
+    #[test]
+    fn user_speech_cancels_the_active_and_queued_chain_and_stops_it() {
+        let mut c = team();
+        prompt(&mut c, "Ada, go");
+        say(&mut c, "a1", "r1", "Grace, your move. ", true);
+        let (out, _) = end_turn(&mut c, 1);
+        assert!(relayed(&out).is_some());
+        // Grace's reply is queued behind Ada's audio when the user cuts in.
+        finals(&mut c, 2, "a2", "r2", "Linus, over to you.");
+        let mut out = vec![];
+        let mut a = vec![];
+        c.hearing(2, &mut out, &mut a);
+        assert!(a.contains(&Action::Cancel));
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, Engine::Interrupt { turn: 2, .. })));
+        assert!(c.chain.is_none() && c.queue.is_empty());
+        // The cancelled turn's late completion neither relays nor speaks.
+        let (out, mut a) = end_turn(&mut c, 2);
+        assert!(relayed(&out).is_none() && a.is_empty());
+        c.drained(&mut vec![], &mut a);
+        assert!(!a.iter().any(|x| matches!(x, Action::Speak(_))));
+    }
+
+    #[test]
+    fn announcements_never_start_a_chain() {
+        let mut c = team();
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::Announcement {
+                speaker: "a1".into(),
+                reply: "w1".into(),
+                text: "Grace, the build finished.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        c.drained(&mut out, &mut a);
+        assert!(relayed(&out).is_none() && !c.active);
+    }
+
+    #[test]
+    fn a_failed_relay_target_turn_ends_the_chain_quietly() {
+        let mut c = team();
+        prompt(&mut c, "Ada, go");
+        assert!(relayed(&agent_turn(&mut c, 1, "a1", "Grace, your move.")).is_some());
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::PromptFailed {
+                turn: 2,
+                message: "x".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert!(c.chain.is_none() && !c.active);
+        assert!(chain_end(&out).is_none());
     }
 }

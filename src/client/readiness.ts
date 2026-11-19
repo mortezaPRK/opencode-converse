@@ -28,9 +28,9 @@ function abortable<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
 export async function waitForConverse(
   client: OpenCodeClient,
   directory: string,
-  hello: (signal: AbortSignal) => Promise<{ protocol: 2 }>,
+  hello: (signal: AbortSignal) => Promise<{ protocol: 3 }>,
   lifetime: AbortSignal,
-): Promise<{ protocol: 2 }> {
+): Promise<{ protocol: 3 }> {
   const deadline = new AbortController();
   const signal = AbortSignal.any([lifetime, deadline.signal]);
   const timer = setTimeout(

@@ -33,6 +33,7 @@ function setup({
     ? [{ value: { id: "connected", created: 0, type: "server.connected", data: {} }, done: false }]
     : [];
   const calls = [];
+  const turns = [];
   const frames = [];
   const errors = [];
   const snapshots = [];
@@ -95,7 +96,7 @@ function setup({
       return {
         hello: async (...args) => {
           calls.push(["hello", ...args]);
-          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 2 });
+          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 3 });
         },
         start: async (...args) => {
           calls.push(["start", ...args]);
@@ -110,6 +111,9 @@ function setup({
         },
         detach: async (...args) => {
           calls.push(["detach", ...args]);
+        },
+        turn: async (input) => {
+          turns.push(input);
         },
       };
     },
@@ -179,6 +183,7 @@ function setup({
     target,
     client,
     calls,
+    turns,
     emit,
     frames,
     errors,
@@ -313,7 +318,7 @@ test("reload rpc.unavailable retries only safe readiness and hello calls before 
     hello: async () => {
       if (++hellos < 3)
         throw { _tag: "RpcError", type: "rpc.unavailable", message: "Plugin is reloading" };
-      return { protocol: 2 };
+      return { protocol: 3 };
     },
   });
   await s.bridge.start();
@@ -2215,6 +2220,64 @@ test("each agent has its own lazily created session; prompts, replies and events
       .sort(),
     ["session-a", "session-b"],
   );
+});
+
+test("a relayed prompt reaches the addressee tagged with its sender, marks the transcript, and carries agent authority only", async () => {
+  const s = crewSetup();
+  await s.bridge.start();
+  await crewTurn(s, 1, "a1", "ask Grace about the build", "session-a", "assistant-1");
+  s.emit("session.text.ended", {
+    sessionID: "session-a",
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    text: "Grace, is the build green?",
+  });
+  s.emit("session.execution.succeeded", { sessionID: "session-a" });
+  await tick();
+  assert.deepEqual(s.frames.at(-1), { type: "turn_end", turn: 1, reason: "completed" });
+
+  // The engine relays: Grace's prompt is tagged, carries the digest, and is not a user line.
+  s.engine({
+    type: "prompt",
+    turn: 2,
+    speaker: "a2",
+    addressed: true,
+    text: "is the build green?",
+    from: "a1",
+  });
+  await tick();
+  const prompt = s.calls.filter(([type]) => type === "prompt").at(-1)[1];
+  assert.equal(prompt.sessionID, "session-b");
+  assert.ok(prompt.text.endsWith("[Ada → Grace]: is the build green?"));
+  assert.doesNotMatch(prompt.text, /Grace, is the build green/, "already handed to her");
+  assert.deepEqual(
+    s.bridge.snapshot().transcript.map(({ role, speaker, to }) => [role, speaker, to]),
+    [
+      ["user", "Ada", undefined],
+      ["assistant", "Ada", "Grace"],
+    ],
+  );
+  // Origins are granted per turn: the user's own turn, then none after it, then agent.
+  const grants = s.turns.map(({ supervisorID, origin }) => [supervisorID, origin]);
+  assert.deepEqual(grants.slice(0, 3), [
+    ["session-a", "user"],
+    ["session-a", "none"],
+    ["session-b", "agent"],
+  ]);
+  await s.bridge.stop();
+});
+
+test("a refused hand-off is shown as a note that never reaches an agent's digest", async () => {
+  const s = crewSetup();
+  await s.bridge.start();
+  s.engine({ type: "chain_end", turn: 4, reason: "turns" });
+  const [note] = s.bridge.snapshot().transcript;
+  assert.equal(note.role, "note");
+  assert.match(note.text, /turn limit/);
+  assert.equal(note.agent, undefined);
+  await crewTurn(s, 5, "a2", "hello", "session-b", "assistant-9");
+  assert.doesNotMatch(s.calls.filter(([type]) => type === "prompt")[0][1].text, /Agent chat/);
+  await s.bridge.stop();
 });
 
 test("status speaker names the agent being waited on or heard, and unknown speakers fail the prompt", async () => {

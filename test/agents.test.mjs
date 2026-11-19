@@ -8,7 +8,13 @@ import {
   DIGEST_LINE_CHARS,
   DIGEST_LINES,
 } from "../dist/client/bridge.js";
-import { agentColor, AGENT_COLORS, entryLabel, speakerSuffix } from "../dist/roster-view.js";
+import {
+  agentColor,
+  AGENT_COLORS,
+  chainLine,
+  entryLabel,
+  speakerSuffix,
+} from "../dist/roster-view.js";
 
 const agents = (...list) => ({ agents: list });
 
@@ -128,4 +134,37 @@ test("transcript labels and colors identify the agent only with several agents",
   assert.equal(speakerSuffix({ participants: [1, 2], speaker: "Ada" }), " · Ada");
   assert.equal(speakerSuffix({ participants: [1], speaker: "Ada" }), "");
   assert.equal(speakerSuffix({ participants: [1, 2], speaker: null }), "");
+});
+
+test("agentChat option is on or off and optional", () => {
+  assert.equal(parseRuntimeConfig({ agentChat: "off" }).agentChat, "off");
+  assert.equal(parseRuntimeConfig({ agentChat: "on" }).agentChat, "on");
+  assert.equal(parseRuntimeConfig({}).agentChat, undefined);
+  assert.equal(parseOptions({ agentChat: "off" }).runtime.agentChat, "off");
+  for (const bad of ["auto", true, 1, "ON"])
+    assert.throws(() => parseRuntimeConfig({ agentChat: bad }), /agentChat must be/);
+});
+
+test("digest skips lines already handed to the reader and notes; labels show hand-offs", () => {
+  const handed = {
+    role: "assistant",
+    agent: 0,
+    speaker: "Ada",
+    text: "Grace, check it",
+    to: "Grace",
+  };
+  assert.equal(digestPrefix([handed], 1, "Grace"), "");
+  assert.match(digestPrefix([handed], 2, "Linus"), /- Ada to Grace: Grace, check it/);
+  assert.equal(digestPrefix([{ role: "note", text: "Agent chat ended" }], 1, "Grace"), "");
+  assert.equal(entryLabel(handed, true), "Ada → Grace");
+  assert.equal(entryLabel({ role: "note", text: "x" }, true), "Chat");
+});
+
+test("chain line shows the hand-off in progress and why a chain ended", () => {
+  const handed = { role: "assistant", agent: 0, speaker: "Ada", text: "x", to: "Grace" };
+  assert.equal(chainLine({ transcript: [handed], status: "thinking" }), "Ada → Grace");
+  assert.equal(chainLine({ transcript: [handed], status: "listening" }), "");
+  const note = { role: "note", text: "Agent chat ended: turn limit reached. Back to you." };
+  assert.equal(chainLine({ transcript: [handed, note], status: "listening" }), note.text);
+  assert.equal(chainLine({ transcript: [], status: "listening" }), "");
 });

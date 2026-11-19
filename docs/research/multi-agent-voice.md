@@ -1,6 +1,6 @@
 # Multiple named voice agents in one conversation
 
-Status (19 November 2026): **phases 0 and 1 implemented in engine 0.6.0; phases 2 and 3 are design only.**
+Status (19 November 2026): **phases 0 and 1 implemented in engine 0.6.0, phase 2 in engine 0.7.0 (protocol 3); phase 3 is design only.**
 Decisions that changed the design below:
 
 - The SDK has no per-prompt agent, so each named agent's session is created with its OpenCode agent and model and never switched (§2.1, §2.3 and §3 phase 0 are superseded on that point).
@@ -9,7 +9,13 @@ Decisions that changed the design below:
 - Voices shipped: `zoey`, `maeve`, `easton`, `preston` (pinned in `assets/models.json`; chosen by description and measured pitch, not yet by ear).
 - Measured with `ptts 0.7.1` and `phonon-31m-en` on this machine: embeddings from `gradium/phonon-voices` load with `Synth::add_voice_file`; the first request per voice costs about 50-90 ms to first audio, later ones about 20-35 ms, the same as repeating one voice.
 - Protocol is version 2: `init.settings.participants`, a `speaker` on `reply_delta`/`reply_end`/`announcement`, and `speaker` on `status`/`interrupt`/`prompt`.
-- Phase 2 hooks: the controller's floor queue (bounded replies from non-holders, promoted when the floor frees), the per-lane `Turn.lane` in `src/client/bridge.ts`, and `attach(sessionID, participantID)`. Agent-to-agent routing, the chain budget, TTL/priority and the prompter lock are not implemented.
+- Phase 2 (engine 0.7.0, protocol 3) as built:
+  - Chain state lives in Rust (`native/runtime/src/chain.rs`, `controller.rs`), with the rest of the conversation state: it already owns turns, the floor, barge-in and addressing, and a host-side budget could be bypassed by a reconnect or bug. The host only delivers what the engine emits.
+  - When a turn completes, the engine runs the addressing rules on the speaker's last complete reply. If it names another agent, the engine starts a **new controller turn** and emits `prompt{speaker: addressee, from: speaker, addressed: true}`. The floor, queue, interrupt and status paths are reused unchanged; Ada's audio finishes first and the addressee's reply queues behind it.
+  - Budget per user turn: 4 agent turns (the first answers the user), 90 s wall clock, 4 consecutive hand-offs (two round trips) for one pair. A refused hand-off sends `chain_end{reason: turns|time|ping_pong}`; self-address, unknown names and plain replies end the chain silently; user speech, mute, failure and shutdown drop the chain and its queue. Announcements never reach the relay path.
+  - Deviations from the design text above: no `maxAgentTurns` option (constants), no `chainModel` (skipped; chained turns use the addressee's own model), no per-agent hand-off tool (the vocative is the whole mechanism), no chain counter in the snapshot. Option: `agentChat: "on" | "off"` (default on).
+  - Prompter lock: following was already exclusive per supervisor session, so the holder is the registered supervisor. Non-holders get an error naming the holder. Reassignment is the tool `converse_take_over_session`, honoured only when the server was told by the user's client (`turn` RPC) that the calling agent's current turn is the user's own speech; relayed agent lines and idle announcements carry no such authority.
+- Phase 2 hooks (as of 0.6.0): the controller's floor queue (bounded replies from non-holders, promoted when the floor frees), the per-lane `Turn.lane` in `src/client/bridge.ts`, and `attach(sessionID, participantID)`. Agent-to-agent routing, the chain budget, TTL/priority and the prompter lock are not implemented.
 
 ## 1. Current architecture (short)
 

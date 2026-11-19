@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicBool;
 #[path = "../src/addressing.rs"]
 mod addressing;
 #[allow(dead_code)]
+#[path = "../src/chain.rs"]
+mod chain;
+#[allow(dead_code)]
 #[path = "../src/controller.rs"]
 mod controller;
 #[allow(dead_code)]

@@ -51,7 +51,7 @@ function setup({ stop, start, fixture, options } = {}) {
     options: options ?? {},
     client: {
       rpc: () => ({
-        hello: async () => ({ protocol: 2, packageRoot: "/local/package" }),
+        hello: async () => ({ protocol: 3, packageRoot: "/local/package" }),
       }),
     },
     storage: {

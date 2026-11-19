@@ -78,6 +78,21 @@ architectures are not implied by operating-system support.
   only its own session and its own followed sessions; transcripts and the sidebar
   show the right name and colour. Confirm voice switching adds no audible gap
   (measured offline: first audio about 20-90 ms per voice on Apple silicon).
+- **Agent-to-agent cost and runaway gate.** With `agentChat: "on"` and 2 to 4 agents:
+  prompt an agent to hand off repeatedly ("keep asking Grace and Ada to hand this
+  back and forth") and confirm the chain stops by itself at 4 agent turns (and never
+  beyond 2 round trips for one pair), shows the "Agent chat ended" note, and returns
+  to listening; count model calls in the server log for one such turn (must be at most
+  4 supervisor turns). Confirm that speaking mid-chain cancels the active voice and
+  the queued ones, ends the chain, and starts no further model turn; that muting does
+  too; that a worker announcement never starts a chain; and that `agentChat: "off"`
+  makes no hand-offs. Check the 90-second cap with a slow model. Record the token
+  cost of a typical four-turn chain before shipping `"on"` as the default.
+- **Prompter lock gate.** With two agents: Ada follows a session; Grace trying
+  `send_message`, `interrupt_session` or `attach_session` on it is refused with Ada's
+  name; saying "Grace, take over that session" moves it (Grace can prompt, Ada can no
+  longer); an agent asking the other to take it over (relayed line) is refused;
+  announcements for the session are spoken in the holder's voice.
 - Test default-device changes, Bluetooth devices, and microphone removal.
 
 ## Distribution and compliance

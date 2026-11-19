@@ -191,7 +191,15 @@ export default Plugin.define({
                       >
                         {entryLabel(entry(), multi())}
                       </div>
-                      <div style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>
+                      <div
+                        style={{
+                          "white-space": "pre-wrap",
+                          "overflow-wrap": "anywhere",
+                          ...(entry().role === "note"
+                            ? { opacity: 0.7, "font-style": "italic" }
+                            : {}),
+                        }}
+                      >
                         {entry().text}
                       </div>
                     </div>

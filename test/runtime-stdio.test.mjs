@@ -9,7 +9,7 @@ import { buildFixture } from "./client-cargo-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 let executable;
-const init = { type: "init", protocol: 2, settings: {} };
+const init = { type: "init", protocol: 3, settings: {} };
 
 async function cleanupResources(resources, remove, timeoutMs = 5000) {
   const results = await Promise.allSettled(
@@ -498,7 +498,7 @@ test(
 
 for (const [name, input] of [
   ["unknown message", '{"type":"unknown"}\n'],
-  ["unknown fields", '{"type":"init","protocol":2,"settings":{"modelPath":"/untrusted"}}\n'],
+  ["unknown fields", '{"type":"init","protocol":3,"settings":{"modelPath":"/untrusted"}}\n'],
   ["unit-message unknown fields", '{"type":"shutdown","surprise":true}\n'],
   ["protocol mismatch", '{"type":"init","protocol":1,"settings":{}}\n'],
   ["malformed JSON", "{definitely not JSON}\n"],
@@ -652,3 +652,79 @@ test("stdio rejects an invalid roster and speakers outside it", { timeout: 15_00
   const result = await proc.closed;
   assert.ok(result.frames.some((f) => f.code === "invalid_state" && f.fatal));
 });
+
+const reply = (proc, turn, speaker, text) => {
+  proc.send({ type: "reply_end", speaker, turn, reply: `r${turn}`, text });
+  proc.send({ type: "turn_end", turn, reason: "completed" });
+};
+
+test(
+  "stdio relays a reply addressed to another agent as a new prompt and speaks both voices",
+  { timeout: 15_000 },
+  async (t) => {
+    const proc = await runtime(t);
+    await proc.wait((frames) => frames.some((f) => f.type === "hello"));
+    proc.send({ ...init, settings: { participants: roster } });
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+    reply(proc, 1, "a1", "Grace, can you check the build?");
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt" && f.from));
+    assert.deepEqual(
+      proc.frames.find((f) => f.type === "prompt" && f.from),
+      {
+        type: "prompt",
+        turn: 2,
+        speaker: "a2",
+        addressed: true,
+        text: "can you check the build?",
+        from: "a1",
+      },
+    );
+    reply(proc, 2, "a2", "It is green.");
+    await proc.wait((all) => {
+      const last = all.findLastIndex((f) => f.type === "status" && f.speaker === "a2");
+      return last >= 0 && all.slice(last).some((f) => f.state === "listening");
+    });
+    proc.send({ type: "shutdown" });
+    const result = await proc.closed;
+    assert.equal(result.code, 0);
+    assert.deepEqual(playbackTrace(result.stderr), [
+      { fixture: "played", text: "Grace, can you check the build?", voice: "zoey" },
+      { fixture: "played", text: "It is green.", voice: "easton" },
+    ]);
+  },
+);
+
+test(
+  "stdio ends a runaway chain at four agent turns with a reason, and never relays with chat off",
+  { timeout: 20_000 },
+  async (t) => {
+    const proc = await runtime(t);
+    await proc.wait((frames) => frames.some((f) => f.type === "hello"));
+    proc.send({ ...init, settings: { participants: roster } });
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+    for (let turn = 1; turn <= 4; turn++) {
+      reply(proc, turn, turn % 2 ? "a1" : "a2", turn % 2 ? "Grace, you." : "Ada, you.");
+      if (turn < 4)
+        await proc.wait((frames) => frames.some((f) => f.type === "prompt" && f.turn === turn + 1));
+    }
+    await proc.wait((frames) => frames.some((f) => f.type === "chain_end"));
+    assert.deepEqual(
+      proc.frames.find((f) => f.type === "chain_end"),
+      { type: "chain_end", turn: 4, reason: "turns" },
+    );
+    assert.equal(proc.frames.filter((f) => f.type === "prompt").length, 4);
+    proc.send({ type: "shutdown" });
+    assert.equal((await proc.closed).code, 0);
+
+    const off = await runtime(t);
+    await off.wait((frames) => frames.some((f) => f.type === "hello"));
+    off.send({ ...init, settings: { participants: roster, agentChat: "off" } });
+    await off.wait((frames) => frames.some((f) => f.type === "prompt"));
+    reply(off, 1, "a1", "Grace, you.");
+    await off.wait((all) => all.some((f) => f.type === "status" && f.state === "listening"));
+    off.send({ type: "shutdown" });
+    const result = await off.closed;
+    assert.equal(result.frames.filter((f) => f.type === "prompt").length, 1);
+    assert.ok(!result.frames.some((f) => f.type === "chain_end"));
+  },
+);
