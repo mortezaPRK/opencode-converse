@@ -41,7 +41,7 @@ export default Plugin.define({
     };
     const view = (): Presence => {
       const state = audio.state();
-      const current = presence(normalizeVoiceStatus(state?.status), failure());
+      const current = presence(normalizeVoiceStatus(state?.status), failure(), state?.progress);
       if (!state?.paused || current.state === "error") return current;
       return {
         ...current,

@@ -42,22 +42,28 @@ Layout:
   engine.lock
 ```
 
-The packaged engine and its shared libraries are copied into
-`<state>/bin/<package-version>/` on first use. The complete marker makes later
-starts reuse it. Speech models stay in `<state>/models`, so they are reused when
+On first use the plugin downloads this version's engine from its GitHub release
+(`https://github.com/mortezaPRK/opencode-converse/releases/download/v<version>/opencode-converse-<version>-<platform>-<arch>[.exe]`)
+into `<state>/bin/<package-version>/`, together with the native third-party
+notices (`THIRD_PARTY.md`). The size and SHA-256 are pinned in the package's
+`assets/engines.json`; a mismatch, oversize, or interrupted download installs
+nothing. Concurrent starts share one install through a lock file and an atomic
+rename. The complete marker makes later starts reuse it with no network access. Speech models stay in `<state>/models`, so they are reused when
 the package or engine version changes.
 
-The npm package must include `assets/bin/<platform>-<arch>/`. Maintainers stage it
-after building the native runtime:
+Published targets are `darwin-arm64`, `linux-x64`, and `win32-x64`. On another
+platform the plugin reports that no engine is published. Developers can build and
+install one locally, which replaces the download for that version:
 
 ```sh
+npm run build
 npm run engine:build
 npm run engine:stage
 ```
 
-`npm run engine:stage` copies the self-contained release executable (ONNX Runtime
-is linked statically; Phonon is pure Rust) into `assets/bin/<platform>-<arch>/`.
-No engine or model download happens at runtime.
+`npm run engine:stage` installs the self-contained release executable (ONNX
+Runtime is linked statically; Phonon is pure Rust) into `<state>/bin/<version>/`.
+Speech models are downloaded separately; see below.
 
 ## Models
 

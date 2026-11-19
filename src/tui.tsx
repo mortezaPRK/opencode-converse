@@ -132,7 +132,7 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         if (!bridge || state().status === "off") throw new Error("Converse is not running");
         await bridge.detach(route.sessionID);
       };
-      const view = () => presence(state().status, failure());
+      const view = () => presence(state().status, failure(), state().progress);
       const toneColor = (tone: PresenceTone) => {
         if (tone === "success") return ctx.theme.text.feedback.success.base;
         if (tone === "info") return ctx.theme.text.feedback.info.base;

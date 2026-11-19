@@ -15,7 +15,8 @@ test("the published package exposes the three host parts and RPC contract", asyn
   }
   assert.ok(!pkg.files.includes("native"));
   assert.ok(!pkg.scripts.postinstall);
-  assert.ok(pkg.files.includes("assets/bin"));
+  assert.ok(!pkg.files.some((file) => file.startsWith("assets/bin")));
+  assert.ok(!pkg.scripts.prepack.includes("stage"));
   assert.equal(RUNTIME_VERSION, pkg.version);
 });
 

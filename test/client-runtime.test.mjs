@@ -1,18 +1,10 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { MAX_FRAME_BYTES } from "../dist/protocol.js";
-import {
-  engineExecutable,
-  ensureEngine,
-  packagedEngineDirectory,
-  RUNTIME_VERSION,
-  stateDir,
-} from "../dist/client/engine.js";
+import { engineExecutable, RUNTIME_VERSION, stateDir } from "../dist/client/engine.js";
 import {
   localSettings,
   parseEngineMessage,
@@ -384,7 +376,7 @@ test("runtime reports EOF after handshake without accepting more events", async 
 test("runtime handles process errors and handshake deadline", async () => {
   const missing = setup();
   missing.proc.emit("error", new Error("ENOENT"));
-  await assert.rejects(missing.runtime.ready, /packaged engine could not be started/);
+  await assert.rejects(missing.runtime.ready, /installed engine could not be started/);
   await missing.runtime.stop();
   const timeout = setup({ helloTimeoutMs: 1 });
   await assert.rejects(timeout.runtime.ready, /timed out/);
@@ -499,56 +491,6 @@ test("state folder and engine path are fixed per platform", () => {
       win32.join("C:\\Users\\me", "AppData", "Local", "opencode-converse"),
     );
   assert.throws(() => stateDir({ env: {}, platform: "win32", home: "relative-home" }), /absolute/);
-});
-
-test("package engine directory is platform and architecture specific", () => {
-  assert.equal(
-    packagedEngineDirectory({ packageRoot: "/pkg", platform: "darwin", arch: "arm64" }),
-    join("/pkg", "assets", "bin", "darwin-arm64"),
-  );
-});
-
-test("engine install copies the packaged runtime into the fixed state folder once", async () => {
-  const root = await mkdtemp(join(tmpdir(), "converse-engine-test-"));
-  const packageRoot = join(root, "package");
-  const source = join(packageRoot, "assets", "bin", `${process.platform}-${process.arch}`);
-  await mkdir(source, { recursive: true });
-  const executable = process.platform === "win32" ? "opencode-converse.exe" : "opencode-converse";
-  await writeFile(join(source, executable), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  await writeFile(join(source, "support-library.txt"), "support");
-  const home = join(root, "home");
-  await mkdir(home, { recursive: true });
-  const options = {
-    env: {},
-    platform: process.platform,
-    arch: process.arch,
-    home,
-    packageRoot,
-  };
-  const installed = ensureEngine(options);
-  assert.equal(installed, engineExecutable(options));
-  assert.equal(await readFile(installed, "utf8"), "#!/bin/sh\nexit 0\n");
-  assert.equal(await readFile(join(dirname(installed), "support-library.txt"), "utf8"), "support");
-  await writeFile(installed, "changed");
-  assert.equal(ensureEngine(options), installed);
-  assert.equal(await readFile(installed, "utf8"), "changed");
-  await rm(root, { recursive: true, force: true });
-});
-
-test("engine install reports a missing packaged platform", async () => {
-  const root = await mkdtemp(join(tmpdir(), "converse-engine-missing-"));
-  assert.throws(
-    () =>
-      ensureEngine({
-        env: {},
-        platform: process.platform,
-        arch: process.arch,
-        home: join(root, "home"),
-        packageRoot: join(root, "package"),
-      }),
-    /No packaged Converse engine/,
-  );
-  await rm(root, { recursive: true, force: true });
 });
 
 test("runtime environment drops credentials and keeps state-folder inputs", () => {

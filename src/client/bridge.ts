@@ -13,6 +13,7 @@ import {
 import { Converse, WORKER_UPDATE_MARKER } from "../rpc.js";
 import { resolveRoster, type Participant, type RuntimeConfig } from "../config.js";
 import type { EngineMessage, HostMessage, LocalSettings, VoiceStatus } from "../protocol.js";
+import { ensureEngine } from "./engine.js";
 import { startRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { waitForConverse } from "./readiness.js";
 
@@ -65,12 +66,14 @@ export interface Snapshot {
   participants: Participant[];
   /** Name of the agent the current status is about (thinking about / speaking), if any. */
   speaker: string | null;
+  /** Engine download progress while starting, e.g. "Downloading voice engine 12/45 MB". */
+  progress?: string;
 }
 export interface BridgeOptions {
   client: OpenCodeClient;
   target: Target;
   settings: LocalSettings;
-  /** Local package root used to install the packaged engine. */
+  /** Local package root that holds the pinned engine manifest. */
   packageRoot?: string;
   /** Fallback when an older server does not return its parsed runtime options. */
   runtimeConfig?: RuntimeConfig;
@@ -280,6 +283,7 @@ export function createBridge(options: BridgeOptions) {
   const lanesBySession = new Map<string, Lane>();
   let speaker: string | null = null;
   let status: VoiceStatus = "off";
+  let progress: string | undefined;
   let paused = false;
   let closed = false;
   let started = false;
@@ -347,6 +351,7 @@ export function createBridge(options: BridgeOptions) {
     transcript: transcript.map((entry) => ({ ...entry })),
     participants: roster.map((participant) => ({ ...participant })),
     speaker,
+    ...(progress ? { progress } : {}),
   });
   const changed = () => options.onChange(snapshot());
   const send = (message: HostMessage) => {
@@ -1061,9 +1066,26 @@ export function createBridge(options: BridgeOptions) {
           clearTimeout(deadline);
         }
         if (closed) return;
+        let executable: string | undefined;
+        if (!options.runtime) {
+          try {
+            executable = await ensureEngine({
+              ...(options.packageRoot ? { packageRoot: options.packageRoot } : {}),
+              signal: abort.signal,
+              onProgress: (text) => {
+                if (closed || text === progress) return;
+                progress = text;
+                changed();
+              },
+            });
+          } finally {
+            progress = undefined;
+          }
+        }
+        if (closed) return;
         runtime = (options.runtime ?? startRuntime)({
           settings: options.settings,
-          ...(options.packageRoot ? { packageRoot: options.packageRoot } : {}),
+          ...(executable ? { executable } : {}),
           ...(runtimeConfig ? { runtime: runtimeConfig } : {}),
           onMessage,
           onError: fail,

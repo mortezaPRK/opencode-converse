@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { homedir } from "node:os";
 import { parseRuntimeConfig, resolveRoster, type RuntimeConfig } from "../config.js";
 import {
   MAX_FRAME_BYTES,
@@ -8,7 +7,7 @@ import {
   type HostMessage,
   type LocalSettings,
 } from "../protocol.js";
-import { ensureEngine, RUNTIME_VERSION } from "./engine.js";
+import { RUNTIME_VERSION } from "./engine.js";
 
 export { RUNTIME_VERSION };
 
@@ -149,8 +148,8 @@ export interface Runtime {
 }
 export interface RuntimeOptions {
   settings: LocalSettings;
-  /** Local package root that contains assets/bin for the current platform. */
-  packageRoot?: string;
+  /** Installed engine executable. Required unless `spawn` is supplied. */
+  executable?: string;
   /** Server-authoritative inference tuning. */
   runtime?: RuntimeConfig;
   onMessage(message: EngineMessage): void;
@@ -161,24 +160,19 @@ export interface RuntimeOptions {
   killTimeoutMs?: number;
 }
 
+const requireExecutable = (path: string | undefined): string => {
+  if (!path) throw new Error("Converse engine executable was not installed");
+  return path;
+};
+
 export function startRuntime(options: RuntimeOptions): Runtime {
   const child = options.spawn
     ? options.spawn()
-    : spawn(
-        ensureEngine({
-          env: process.env,
-          platform: process.platform,
-          arch: process.arch,
-          home: homedir(),
-          packageRoot: options.packageRoot,
-        }),
-        ["run"],
-        {
-          stdio: "pipe",
-          windowsHide: true,
-          env: runtimeEnvironment(),
-        },
-      );
+    : spawn(requireExecutable(options.executable), ["run"], {
+        stdio: "pipe",
+        windowsHide: true,
+        env: runtimeEnvironment(),
+      });
   let pending: Buffer[] = [];
   let pendingBytes = 0;
   let hello = false;
@@ -351,7 +345,7 @@ export function startRuntime(options: RuntimeOptions): Runtime {
   child.on("error", (error) =>
     fail(
       new Error(
-        `Converse runtime unavailable: ${error.message}. The packaged engine could not be started from the app state folder.`,
+        `Converse runtime unavailable: ${error.message}. The installed engine could not be started from the app state folder.`,
       ),
     ),
   );
