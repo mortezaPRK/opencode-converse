@@ -2,6 +2,7 @@
 mod audio;
 mod controller;
 mod generation;
+mod inventory;
 mod models;
 mod paths;
 mod protocol;
@@ -10,6 +11,7 @@ mod speech;
 use controller::{Action, Controller};
 use protocol::{Engine, Host, Status, MAX_FRAME_BYTES};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
     mpsc::{self, SyncSender},
@@ -294,13 +296,23 @@ impl Backend {
     }
 }
 
-fn run(mode: Mode) -> i32 {
+fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
     if emit(&[Engine::Hello {
         protocol: protocol::VERSION,
     }])
     .is_err()
     {
         return 1;
+    }
+    if let Some(path) = test_state_dir {
+        if !path.is_absolute() {
+            error(
+                "invalid_test_state",
+                "Test state directory must be absolute",
+            );
+            return 1;
+        }
+        paths::set_test_state_dir(path);
     }
     if mode != Mode::Native && !fixture_allowed(cfg!(debug_assertions)) {
         error("fixture_unavailable", "Test-only fixture modes require compiled debug assertions; local storage was not accessed.");
@@ -371,7 +383,7 @@ fn run(mode: Mode) -> i32 {
                 } else if mode == Mode::Native {
                     #[cfg(feature = "native-audio")]
                     {
-                        backend.audio = Some(audio::Backend::start(settings, tx.clone()));
+                        backend.audio = Some(audio::Backend::start(*settings, tx.clone()));
                     }
                     #[cfg(not(feature = "native-audio"))]
                     {
@@ -439,10 +451,15 @@ fn doctor() -> i32 {
     eprintln!("Native audio compiled: {}", cfg!(feature = "native-audio"));
     eprintln!("Device capture/playback: not tested (doctor does not open devices)");
     let models_ok = match paths::check_models() {
-        Ok(path) => {
+        Ok(models) => {
             eprintln!(
-                "Required model files present at {} (integrity/inference not verified)",
-                path.display()
+                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR: {}\n  TTS model: {}\n  TTS tokens: {}\n  TTS data: {}",
+                models.vad.display(),
+                models.turn.display(),
+                models.asr.display(),
+                models.tts.model.display(),
+                models.tts.tokens.display(),
+                models.tts.data_dir.display(),
             );
             true
         }
@@ -463,35 +480,55 @@ fn doctor() -> i32 {
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let code = match args
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["run"] => run(Mode::Native),
-        ["run", "--test-fixture"] => run(Mode::Fixture),
-        ["run", "--test-fixture-loading"] => run(Mode::LoadingFixture),
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let code = match a.as_slice() {
+        ["run"] => run(Mode::Native, None),
+        ["run", "--test-fixture"] => run(Mode::Fixture, None),
+        ["run", "--test-fixture-loading"] => run(Mode::LoadingFixture, None),
+        ["run", "--test-fixture", "--test-state-dir", dir]
+        | ["run", "--test-fixture-loading", "--test-state-dir", dir] => {
+            if !fixture_allowed(cfg!(debug_assertions)) {
+                error("fixture_unavailable", "Test-only fixture modes require compiled debug assertions; local storage was not accessed.");
+                1
+            } else {
+                let mode = if a[1] == "--test-fixture" {
+                    Mode::Fixture
+                } else {
+                    Mode::LoadingFixture
+                };
+                run(mode, Some(PathBuf::from(*dir)))
+            }
+        }
         ["doctor"] => doctor(),
+        ["doctor", "--test-state-dir", dir] => {
+            if !fixture_allowed(cfg!(debug_assertions)) {
+                error("fixture_unavailable", "Test-only state isolation requires compiled debug assertions; local storage was not accessed.");
+                1
+            } else {
+                paths::set_test_state_dir(PathBuf::from(*dir));
+                doctor()
+            }
+        }
         ["doctor", "--test-only-inference"] => {
             if !fixture_allowed(cfg!(debug_assertions)) {
                 eprintln!("Test-only inference requires compiled debug assertions; local storage was not accessed.");
-                std::process::exit(1);
-            }
-            #[cfg(feature = "native-audio")]
-            {
-                match audio::test_only_inference() {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        eprintln!("Test-only inference failed: {e:#}");
-                        1
+                1
+            } else {
+                #[cfg(feature = "native-audio")]
+                {
+                    match audio::test_only_inference() {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            eprintln!("Test-only inference failed: {e:#}");
+                            1
+                        }
                     }
                 }
-            }
-            #[cfg(not(feature = "native-audio"))]
-            {
-                eprintln!("Test-only inference requires --features native-audio");
-                1
+                #[cfg(not(feature = "native-audio"))]
+                {
+                    eprintln!("Test-only inference requires --features native-audio");
+                    1
+                }
             }
         }
         ["models", "install"] => match models::install() {
@@ -506,7 +543,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("Usage: opencode-converse run | doctor | models install\nTest-only: run --test-fixture | run --test-fixture-loading | doctor --test-only-inference");
+            eprintln!("Usage: opencode-converse run | doctor | models install\nTest-only: run --test-fixture [--test-state-dir PATH] | run --test-fixture-loading [--test-state-dir PATH] | doctor [--test-state-dir PATH] | doctor --test-only-inference");
             2
         }
     };

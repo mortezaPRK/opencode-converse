@@ -17,13 +17,6 @@ export const ConverseDesktop = Ipc.define({
       input: Schema.Struct({
         serverID: Schema.String,
         directory: Schema.String,
-        model: Schema.optional(
-          Schema.Struct({
-            providerID: Schema.String,
-            id: Schema.String,
-            variant: Schema.optional(Schema.String),
-          }),
-        ),
       }),
     },
     stop: {},

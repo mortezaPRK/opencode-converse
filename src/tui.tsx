@@ -1,9 +1,15 @@
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { Plugin } from "@opencode/plugin/tui";
 import { createBridge, isStoppedError, type Snapshot } from "./client/bridge.js";
 import { localSettings } from "./client/runtime.js";
+import { parseRuntimeConfig } from "./config.js";
 import { presence, presenceGlyph, PRESENCE_ERROR_MS, type PresenceTone } from "./presence.js";
 import type { LocalSettings } from "./protocol.js";
+
+/** dist/tui.js -> package root. */
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
   return Plugin.define({
@@ -48,24 +54,14 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         if (disposed || observedStop !== stopGeneration || (bridge && bridge !== retiring)) return;
         const location = ctx.location ?? ctx.data.location.default();
         if (!location) throw new Error("Select an OpenCode location before starting Converse");
-        const selected = ctx.ui.model.current();
+        const runtimeConfig = parseRuntimeConfig(ctx.options);
         const current = (dependencies.bridge ?? createBridge)({
           client: ctx.client,
           // The TUI exposes one authenticated connection, not a desktop server registry.
-          target: {
-            serverID: "connected",
-            directory: location.directory,
-            ...(selected
-              ? {
-                  model: {
-                    providerID: selected.providerID,
-                    id: selected.modelID,
-                    ...(selected.variant ? { variant: selected.variant } : {}),
-                  },
-                }
-              : {}),
-          },
+          target: { serverID: "connected", directory: location.directory },
           settings: localSettings(prefs),
+          packageRoot: PACKAGE_ROOT,
+          ...(Object.keys(runtimeConfig).length ? { runtimeConfig } : {}),
           onChange(next) {
             if (!disposed && bridge === current) setState(next);
           },

@@ -1,4 +1,28 @@
+use crate::inventory;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static TEST_STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(feature = "native-audio")]
+pub const DEFAULT_ASR_THREADS: u16 = 4;
+#[cfg(feature = "native-audio")]
+pub const DEFAULT_TTS_THREADS: u16 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsPaths {
+    pub model: PathBuf,
+    pub tokens: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPaths {
+    pub vad: PathBuf,
+    pub turn: PathBuf,
+    pub asr: PathBuf,
+    pub tts: TtsPaths,
+}
 
 fn absolute_base(value: std::ffi::OsString, name: &str) -> anyhow::Result<PathBuf> {
     let path = PathBuf::from(value);
@@ -95,18 +119,7 @@ pub fn publish_noclobber(source: &Path, target: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn data_dir() -> anyhow::Result<PathBuf> {
-    // Overrides are deliberately local-development-only, never part of stdio settings.
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("OPENCODE_CONVERSE_DEV_DATA_DIR") {
-            let path = PathBuf::from(path);
-            anyhow::ensure!(
-                path.is_absolute(),
-                "OPENCODE_CONVERSE_DEV_DATA_DIR must be absolute"
-            );
-            return Ok(path);
-        }
-    }
+fn default_state_dir() -> anyhow::Result<PathBuf> {
     #[cfg(target_os = "windows")]
     let path = windows_base(
         std::env::var_os("LOCALAPPDATA"),
@@ -130,31 +143,83 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
     Ok(path.join("opencode-converse"))
 }
 
-pub const MODEL_FILES: &[&str] = &[
-    "silero_vad.onnx",
-    "smart-turn-v3.2-cpu.onnx",
-    "ggml-base.en.bin",
-    "tts/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx",
-    "tts/vits-piper-en_US-lessac-medium/tokens.txt",
-];
+/// Test-only state isolation, reachable only from the fixture CLI in debug builds.
+pub fn set_test_state_dir(path: PathBuf) {
+    let _ = TEST_STATE_DIR.set(path);
+}
 
-pub fn check_models() -> anyhow::Result<PathBuf> {
-    let models = data_dir()?.join("models");
-    let mut missing: Vec<_> = MODEL_FILES
-        .iter()
-        .filter(|name| !models.join(name).is_file())
-        .map(|name| models.join(name).display().to_string())
-        .collect();
-    let espeak = models.join("tts/vits-piper-en_US-lessac-medium/espeak-ng-data");
-    if !espeak.is_dir() {
-        missing.push(espeak.display().to_string());
+/// Fixed app state folder for the engine, models, downloads, and the engine lock.
+pub fn state_dir() -> anyhow::Result<PathBuf> {
+    match TEST_STATE_DIR.get() {
+        Some(path) => Ok(path.clone()),
+        None => default_state_dir(),
     }
-    anyhow::ensure!(missing.is_empty(), "Models are missing. Run `opencode-converse models install` to explicitly download the pinned, separately licensed English artifacts. Required locations:\n{}\nThen run `opencode-converse doctor`.", missing.join("\n"));
-    Ok(models)
+}
+
+pub fn models_dir() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("models"))
+}
+
+pub fn resolve_models() -> anyhow::Result<ModelPaths> {
+    let models = models_dir()?;
+    let inventory = inventory::Inventory::load()?;
+    let vad = inventory.role_asset("vad")?;
+    let turn = inventory.role_asset("turn")?;
+    let asr = inventory.role_asset("asr")?;
+    let tts = inventory.role_asset("tts")?;
+    Ok(ModelPaths {
+        vad: models.join(vad.runtime_path()),
+        turn: models.join(turn.runtime_path()),
+        asr: models.join(asr.runtime_path()),
+        tts: TtsPaths {
+            model: models.join(tts.runtime_path()),
+            tokens: models.join(
+                tts.tokens_path()
+                    .ok_or_else(|| anyhow::anyhow!("TTS asset has no tokens path"))?,
+            ),
+            data_dir: models.join(
+                tts.data_dir()
+                    .ok_or_else(|| anyhow::anyhow!("TTS asset has no dataDir"))?,
+            ),
+        },
+    })
+}
+
+pub fn check_models() -> anyhow::Result<ModelPaths> {
+    let paths = resolve_models()?;
+    let models = models_dir()?;
+    let mut missing = vec![];
+    for (name, path, directory) in [
+        ("vad", &paths.vad, false),
+        ("turn", &paths.turn, false),
+        ("asr", &paths.asr, false),
+        ("tts model", &paths.tts.model, false),
+        ("tts tokens", &paths.tts.tokens, false),
+        ("tts data directory", &paths.tts.data_dir, true),
+    ] {
+        let present = if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if !present {
+            missing.push(format!("{name}: {}", path.display()));
+        }
+    }
+    let command = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "opencode-converse".into());
+    anyhow::ensure!(
+        missing.is_empty(),
+        "Converse speech models are missing under {}.\n{}\nRun `{command} models install` to download the pinned, separately licensed English artifacts, then run `{command} doctor`.",
+        models.display(),
+        missing.join("\n")
+    );
+    Ok(paths)
 }
 
 pub fn lock() -> anyhow::Result<std::fs::File> {
-    let dir = data_dir()?;
+    let dir = state_dir()?;
     lock_at(&dir)
 }
 
@@ -201,6 +266,23 @@ mod tests {
             absolute_base(root.path().into(), "HOME").unwrap(),
             root.path()
         );
+    }
+
+    #[test]
+    fn model_defaults_come_from_inventory_roles() {
+        let inventory = inventory::Inventory::load().unwrap();
+        let defaults = resolve_models().unwrap();
+        let models = models_dir().unwrap();
+        let vad = inventory.role_asset("vad").unwrap();
+        let turn = inventory.role_asset("turn").unwrap();
+        let asr = inventory.role_asset("asr").unwrap();
+        let tts = inventory.role_asset("tts").unwrap();
+        assert_eq!(defaults.vad, models.join(vad.runtime_path()));
+        assert_eq!(defaults.turn, models.join(turn.runtime_path()));
+        assert_eq!(defaults.asr, models.join(asr.runtime_path()));
+        assert_eq!(defaults.tts.model, models.join(tts.runtime_path()));
+        assert_eq!(defaults.tts.tokens, models.join(tts.tokens_path().unwrap()));
+        assert_eq!(defaults.tts.data_dir, models.join(tts.data_dir().unwrap()));
     }
 
     #[test]

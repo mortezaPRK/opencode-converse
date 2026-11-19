@@ -29,7 +29,10 @@ architectures are not implied by operating-system support.
   indicator. Speaker playback remains independent.
 - Late generation results and interrupted reply chunks cannot restart speech.
 - Worker/project data cannot make the model approve a permission request.
-- Remote settings cannot choose a local executable, model path, or output file.
+- Engine and speech-model paths are fixed under the app state folder. No plugin
+  option or environment variable can redirect them. The packaged engine is copied
+  once into the state folder, and models are reused across engine versions; device
+  preferences stay in host storage.
 - Bounded protocol frames and queues fail clearly rather than growing without limit.
 - No default logs contain transcripts, credentials, or raw native-library output.
 
@@ -49,6 +52,9 @@ architectures are not implied by operating-system support.
 - Produce a third-party inventory, notices, and any required source materials.
 - Review npm and Cargo dependency advisories. Do not use forced dependency upgrades
   as a substitute for testing the supported SDK.
+- Package each target's staged engine and required shared libraries under
+  `assets/bin/<platform>-<arch>/`. Verify the copied state-folder engine starts
+  without a compiler, Node runtime, or engine download on the user's machine.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.
 - Public repository name/ownership, signing identities, and publication are
   separate explicit actions. No workflow in this repository publishes releases.

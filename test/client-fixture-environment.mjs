@@ -10,6 +10,5 @@ export function fixtureEnvironment(directory, env = process.env) {
     USERPROFILE: home,
     LOCALAPPDATA: join(home, "AppData", "Local"),
     XDG_DATA_HOME: join(home, ".local", "share"),
-    OPENCODE_CONVERSE_DEV_DATA_DIR: directory,
   };
 }

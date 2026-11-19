@@ -10,7 +10,8 @@ import {
   type OpenCodeClient,
   type OpenCodeEvent,
 } from "@opencode/client";
-import { Converse, WORKER_UPDATE_MARKER, type ModelRef } from "../rpc.js";
+import { Converse, WORKER_UPDATE_MARKER } from "../rpc.js";
+import type { RuntimeConfig } from "../config.js";
 import type { EngineMessage, HostMessage, LocalSettings, VoiceStatus } from "../protocol.js";
 import { startRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { waitForConverse } from "./readiness.js";
@@ -18,7 +19,6 @@ import { waitForConverse } from "./readiness.js";
 export interface Target {
   readonly serverID: string;
   readonly directory: string;
-  readonly model?: ModelRef;
 }
 export interface Snapshot {
   status: VoiceStatus;
@@ -29,6 +29,10 @@ export interface BridgeOptions {
   client: OpenCodeClient;
   target: Target;
   settings: LocalSettings;
+  /** Local package root used to install the packaged engine. */
+  packageRoot?: string;
+  /** Fallback when an older server does not return its parsed runtime options. */
+  runtimeConfig?: RuntimeConfig;
   onChange(snapshot: Snapshot): void;
   onError(error: Error): void;
   runtime?: (options: RuntimeOptions) => Runtime;
@@ -157,10 +161,7 @@ const eventTypes = [
 export function createBridge(options: BridgeOptions) {
   // Freeze values, not host accessors that can silently change servers later.
   const client = options.client;
-  const target: Target = {
-    ...options.target,
-    ...(options.target.model ? { model: { ...options.target.model } } : {}),
-  };
+  const target: Target = { ...options.target };
   const rpc = client.rpc(Converse);
   const request = { location: { directory: target.directory } };
   const abort = new AbortController();
@@ -749,13 +750,14 @@ export function createBridge(options: BridgeOptions) {
         );
         if (hello.protocol !== 1) throw new Error("Converse server protocol mismatch");
         if (closed) return;
-        const result = await rpc.start(target.model ? { model: target.model } : {}, {
+        const result = await rpc.start(undefined, {
           ...request,
           // Allocation must complete (or reach its own deadline) even if local
           // stop runs, so a late returned server session can always be cleaned up.
           signal: AbortSignal.timeout(10_000),
         });
         sessionID = result.sessionID;
+        const runtimeConfig = result.runtime ?? options.runtimeConfig;
         if (closed) {
           try {
             await rpc.stop(
@@ -783,6 +785,8 @@ export function createBridge(options: BridgeOptions) {
         if (closed) return;
         runtime = (options.runtime ?? startRuntime)({
           settings: options.settings,
+          ...(options.packageRoot ? { packageRoot: options.packageRoot } : {}),
+          ...(runtimeConfig ? { runtime: runtimeConfig } : {}),
           onMessage,
           onError: fail,
         });

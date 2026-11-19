@@ -47,21 +47,8 @@ export default Plugin.define({
         throw new Error(
           "Open a session on the desired server and location before starting Converse",
         );
-      const model = ctx.screen.current()?.composer.model();
       await audio.start(
-        {
-          serverID: session.server.id,
-          directory: session.directory,
-          ...(model
-            ? {
-                model: {
-                  providerID: model.providerID,
-                  id: model.modelID,
-                  ...(model.variant ? { variant: model.variant } : {}),
-                },
-              }
-            : {}),
-        },
+        { serverID: session.server.id, directory: session.directory },
         { signal: ctx.signal },
       );
     };

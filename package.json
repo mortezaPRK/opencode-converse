@@ -8,8 +8,11 @@
     "dist",
     "LICENSE",
     "THIRD_PARTY.md",
+    "docs/configuration.md",
+    "docs/options.schema.json",
     "docs/release-gates.md",
-    "assets/models.json"
+    "assets/models.json",
+    "assets/bin"
   ],
   "type": "module",
   "exports": {
@@ -42,6 +45,7 @@
     "test:integration": "cargo build --manifest-path native/Cargo.toml -p opencode-converse --locked && npm run build && node --test test/integration/bridge.mjs",
     "test:host": "npm run build && node --test test/integration/host.mjs",
     "engine:build": "node native/scripts/build.mjs",
+    "engine:stage": "node native/scripts/stage.mjs",
     "engine:test": "cargo test --manifest-path native/Cargo.toml -p opencode-converse --locked",
     "engine:models": "cargo run --manifest-path native/Cargo.toml -p opencode-converse --locked -- models install",
     "engine:fmt": "cargo fmt --manifest-path native/Cargo.toml --all --check",

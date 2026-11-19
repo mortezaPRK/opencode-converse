@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { posix, win32 } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, posix, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { MAX_FRAME_BYTES } from "../dist/protocol.js";
 import {
+  engineExecutable,
+  ensureEngine,
+  packagedEngineDirectory,
+  RUNTIME_VERSION,
+  stateDir,
+} from "../dist/client/engine.js";
+import {
   localSettings,
   parseEngineMessage,
   runtimeEnvironment,
-  runtimePath,
+  runtimeSettings,
   startRuntime,
 } from "../dist/client/runtime.js";
 
@@ -63,6 +72,34 @@ test("runtime sends only protocol init and local device preferences", async () =
   assert.equal(proc.stdin.writableEnded, true);
   assert.deepEqual(proc.frames.at(-1), { type: "shutdown" });
   assert.deepEqual(proc.kills, ["SIGKILL"]);
+});
+
+test("runtime sends configured inference tuning over init", async () => {
+  const { proc, runtime } = setup({
+    runtime: { asrThreads: 2, ttsThreads: 3, useGpu: false },
+  });
+  proc.frame({ type: "hello", protocol: 1 });
+  await runtime.ready;
+  assert.deepEqual(proc.frames, [
+    {
+      type: "init",
+      protocol: 1,
+      settings: {
+        inputDevice: "mic",
+        asrThreads: 2,
+        ttsThreads: 3,
+        useGpu: false,
+      },
+    },
+  ]);
+  await runtime.stop();
+});
+
+test("runtimeSettings contains only inference tuning", () => {
+  assert.deepEqual(runtimeSettings({ asrThreads: 2, useGpu: false }), {
+    asrThreads: 2,
+    useGpu: false,
+  });
 });
 
 test("fragmented valid stdout frames are concatenated at most once per completed frame", async (t) => {
@@ -270,7 +307,7 @@ test("runtime reports EOF after handshake without accepting more events", async 
 test("runtime handles process errors and handshake deadline", async () => {
   const missing = setup();
   missing.proc.emit("error", new Error("ENOENT"));
-  await assert.rejects(missing.runtime.ready, /npm run engine:build.*CONVERSE_BIN/);
+  await assert.rejects(missing.runtime.ready, /packaged engine could not be started/);
   await missing.runtime.stop();
   const timeout = setup({ helloTimeoutMs: 1 });
   await assert.rejects(timeout.runtime.ready, /timed out/);
@@ -333,73 +370,114 @@ test("graceful exit avoids kill; duplicate hello and invalid UTF-8 fail", async 
   await invalid.runtime.stop();
 });
 
-test("runtime lookup accepts only local dev override and does not inherit credentials", () => {
+test("state folder and engine path are fixed per platform", () => {
   assert.equal(
-    runtimePath({}, "darwin", "/home/me"),
+    stateDir({ env: {}, platform: "darwin", home: "/home/me" }),
+    posix.join("/home/me", "Library", "Application Support", "opencode-converse"),
+  );
+  assert.equal(
+    engineExecutable({ env: {}, platform: "darwin", home: "/home/me" }),
     posix.join(
       "/home/me",
       "Library",
       "Application Support",
       "opencode-converse",
-      "0.1.0",
+      "bin",
+      RUNTIME_VERSION,
       "opencode-converse",
     ),
   );
   assert.equal(
-    runtimePath({ XDG_DATA_HOME: "/data" }, "linux", "/home/me"),
-    posix.join("/data", "opencode-converse", "0.1.0", "opencode-converse"),
-  );
-  assert.equal(runtimePath({ CONVERSE_BIN: "/dev/converse" }, "linux"), "/dev/converse");
-  assert.equal(
-    runtimePath({ XDG_DATA_HOME: "relative" }, "linux", "/home/me"),
-    posix.join("/home/me", ".local", "share", "opencode-converse", "0.1.0", "opencode-converse"),
+    stateDir({ env: { XDG_DATA_HOME: "/data" }, platform: "linux", home: "/home/me" }),
+    "/data/opencode-converse",
   );
   assert.equal(
-    runtimePath({ LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" }, "win32", "C:\\Users\\me"),
-    win32.join(
-      "C:\\Users\\me\\AppData\\Local",
-      "opencode-converse",
-      "0.1.0",
-      "opencode-converse.exe",
-    ),
+    stateDir({ env: { XDG_DATA_HOME: "relative" }, platform: "linux", home: "/home/me" }),
+    posix.join("/home/me", ".local", "share", "opencode-converse"),
   );
   assert.equal(
-    runtimePath({}, "win32", "C:\\Users\\me"),
+    engineExecutable({ env: {}, platform: "win32", home: "C:\\Users\\me" }),
     win32.join(
       "C:\\Users\\me",
       "AppData",
       "Local",
       "opencode-converse",
-      "0.1.0",
+      "bin",
+      RUNTIME_VERSION,
       "opencode-converse.exe",
     ),
   );
   assert.equal(
-    runtimePath({ CONVERSE_BIN: "C:\\dev\\converse.exe" }, "win32"),
-    "C:\\dev\\converse.exe",
+    stateDir({
+      env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+      platform: "win32",
+      home: "C:\\Users\\me",
+    }),
+    "C:\\Users\\me\\AppData\\Local\\opencode-converse",
   );
   for (const LOCALAPPDATA of ["", "relative", "C:relative", "\\relative-to-drive"])
     assert.equal(
-      runtimePath({ LOCALAPPDATA }, "win32", "C:\\Users\\me"),
-      win32.join(
-        "C:\\Users\\me",
-        "AppData",
-        "Local",
-        "opencode-converse",
-        "0.1.0",
-        "opencode-converse.exe",
-      ),
+      stateDir({ env: { LOCALAPPDATA }, platform: "win32", home: "C:\\Users\\me" }),
+      win32.join("C:\\Users\\me", "AppData", "Local", "opencode-converse"),
     );
+  assert.throws(() => stateDir({ env: {}, platform: "win32", home: "relative-home" }), /absolute/);
+});
+
+test("package engine directory is platform and architecture specific", () => {
   assert.equal(
-    runtimePath({ LOCALAPPDATA: "C:\\data" }, "win32", "relative-home"),
-    win32.join("C:\\data", "opencode-converse", "0.1.0", "opencode-converse.exe"),
+    packagedEngineDirectory({ packageRoot: "/pkg", platform: "darwin", arch: "arm64" }),
+    posix.join("/pkg", "assets", "bin", "darwin-arm64"),
   );
-  assert.throws(() => runtimePath({}, "win32", "relative-home"), /home.*absolute/);
-  assert.throws(() => runtimePath({ CONVERSE_BIN: "C:\\dev\\converse.exe" }, "linux"), /absolute/);
-  assert.throws(() => runtimePath({ CONVERSE_BIN: "relative" }), /absolute/);
+});
+
+test("engine install copies the packaged runtime into the fixed state folder once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "converse-engine-test-"));
+  const packageRoot = join(root, "package");
+  const source = join(packageRoot, "assets", "bin", `${process.platform}-${process.arch}`);
+  await mkdir(source, { recursive: true });
+  const executable = process.platform === "win32" ? "opencode-converse.exe" : "opencode-converse";
+  await writeFile(join(source, executable), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await writeFile(join(source, "support-library.txt"), "support");
+  const home = join(root, "home");
+  await mkdir(home, { recursive: true });
+  const options = {
+    env: {},
+    platform: process.platform,
+    arch: process.arch,
+    home,
+    packageRoot,
+  };
+  const installed = ensureEngine(options);
+  assert.equal(installed, engineExecutable(options));
+  assert.equal(await readFile(installed, "utf8"), "#!/bin/sh\nexit 0\n");
+  assert.equal(await readFile(join(dirname(installed), "support-library.txt"), "utf8"), "support");
+  await writeFile(installed, "changed");
+  assert.equal(ensureEngine(options), installed);
+  assert.equal(await readFile(installed, "utf8"), "changed");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("engine install reports a missing packaged platform", async () => {
+  const root = await mkdtemp(join(tmpdir(), "converse-engine-missing-"));
+  assert.throws(
+    () =>
+      ensureEngine({
+        env: {},
+        platform: process.platform,
+        arch: process.arch,
+        home: join(root, "home"),
+        packageRoot: join(root, "package"),
+      }),
+    /No packaged Converse engine/,
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test("runtime environment drops credentials and keeps state-folder inputs", () => {
   assert.deepEqual(
     runtimeEnvironment({
       HOME: "/home/me",
+      XDG_DATA_HOME: "/data",
       OPENCODE_SERVER_PASSWORD: "secret",
       OPENAI_API_KEY: "secret",
       NODE_OPTIONS: "evil",
@@ -412,6 +490,7 @@ test("runtime lookup accepts only local dev override and does not inherit creden
     }),
     {
       HOME: "/home/me",
+      XDG_DATA_HOME: "/data",
       XDG_RUNTIME_DIR: "/run/user/1000",
       PULSE_SERVER: "unix:/mnt/wslg/PulseServer",
       PIPEWIRE_REMOTE: "pipewire-0",

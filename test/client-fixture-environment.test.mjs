@@ -20,7 +20,6 @@ test("fixture OS home and data fallbacks stay isolated without passing compiler 
     assert.equal(isAbsolute(env[key]), true);
     assert.ok(env[key].startsWith(directory));
   }
-  assert.equal(env.OPENCODE_CONVERSE_DEV_DATA_DIR, directory);
   for (const key of [
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",

@@ -2,5 +2,5 @@
 //! in the runtime controller; this crate does not maintain a second text queue.
 mod engine;
 mod joiner;
-pub use engine::Tts;
+pub use engine::{Tts, TtsConfig};
 pub use joiner::Joiner;

@@ -1,47 +1,14 @@
 //! Explicit, pinned model installation. Startup never calls this module.
+use crate::inventory::{self, Asset, Format, Inventory};
 use anyhow::{ensure, Context, Result};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::time::Duration;
 
-const INVENTORY: &str = include_str!("../../../assets/models.json");
 const MAX_EXTRACTED: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 8192;
-const PIPER_ROOT: &str = "vits-piper-en_US-lessac-medium";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Inventory {
-    schema: u32,
-    language: String,
-    assets: Vec<Asset>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Asset {
-    id: String,
-    file: String,
-    url: String,
-    sha256: String,
-    bytes: u64,
-    format: Format,
-}
-#[derive(Deserialize, PartialEq)]
-enum Format {
-    #[serde(rename = "file")]
-    File,
-    #[serde(rename = "tar.bz2")]
-    TarBz2,
-}
-
-fn safe_path(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && path.components().all(|c| matches!(c, Component::Normal(_)))
-        && !path.to_string_lossy().contains(['\\', ':'])
-}
 fn regular_length(path: &Path, expected: u64) -> Result<File> {
     ensure!(expected <= MAX_EXTRACTED, "File exceeds verification limit");
     let meta = fs::symlink_metadata(path)?;
@@ -104,7 +71,7 @@ fn copy_verified(source: &Path, target: &Path, asset: &Asset) -> Result<()> {
     );
     Ok(())
 }
-fn extract(reader: impl Read, dest: &Path) -> Result<()> {
+fn extract(reader: impl Read, dest: &Path, root: &str) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     let mut total = 0u64;
     let mut files = 0usize;
@@ -113,7 +80,14 @@ fn extract(reader: impl Read, dest: &Path) -> Result<()> {
         files += 1;
         ensure!(files <= MAX_FILES, "Archive has too many entries");
         let path = entry.path()?.into_owned();
-        ensure!(safe_path(&path), "Unsafe archive path");
+        ensure!(
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                && !path.to_string_lossy().contains(['\\', ':']),
+            "Unsafe archive path"
+        );
         ensure!(
             path.components().count() <= 64,
             "Archive path is too deeply nested"
@@ -121,7 +95,7 @@ fn extract(reader: impl Read, dest: &Path) -> Result<()> {
         ensure!(
             path.components()
                 .next()
-                .is_some_and(|p| p.as_os_str() == PIPER_ROOT),
+                .is_some_and(|p| p.as_os_str() == root),
             "Unexpected archive root"
         );
         let kind = entry.header().entry_type();
@@ -228,16 +202,12 @@ fn copy_cached(cached: &Path, staged: &Path, asset: &Asset) -> Result<()> {
 }
 
 pub fn install() -> Result<()> {
-    let inventory: Inventory = serde_json::from_str(INVENTORY)?;
-    ensure!(
-        inventory.schema == 1 && inventory.language == "en",
-        "Unsupported compiled inventory"
-    );
-    let data = crate::paths::data_dir()?;
+    let inventory = Inventory::load()?;
+    let data = crate::paths::state_dir()?;
     fs::create_dir_all(&data)?;
     // Installation cannot replace files an active engine is loading.
     let _engine_lock = crate::paths::lock()?;
-    let models = data.join("models");
+    let models = crate::paths::models_dir()?;
     fs::create_dir_all(&models)?;
     let cache = data.join("downloads");
     fs::create_dir_all(&cache)?;
@@ -249,30 +219,20 @@ pub fn install() -> Result<()> {
         .user_agent(concat!("opencode-converse/", env!("CARGO_PKG_VERSION")))
         .build()?;
     eprintln!("Installing pinned English speech models. Model/dependency licenses remain their owners' terms; see native/THIRD_PARTY.md and assets model notices.");
-    for asset in inventory.assets {
+    for asset in &inventory.assets {
         ensure!(
-            safe_path(Path::new(&asset.id)) && Path::new(&asset.id).components().count() == 1,
-            "Invalid asset id"
+            asset.bytes <= MAX_EXTRACTED,
+            "Asset {} exceeds the verification limit",
+            asset.id
         );
-        ensure!(
-            safe_path(Path::new(&asset.file)) && Path::new(&asset.file).components().count() == 1,
-            "Invalid asset file"
-        );
-        ensure!(
-            asset.bytes > 0
-                && asset.bytes <= MAX_EXTRACTED
-                && asset.sha256.len() == 64
-                && asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-            "Invalid compiled asset digest/size"
-        );
-        let _lock = asset_lock(&data.join("model-locks"), &asset)?;
+        let _lock = asset_lock(&data.join("model-locks"), asset)?;
         let cached = cache.join(&asset.file);
         let stage = tempfile::Builder::new()
             .prefix(".model-stage-")
             .tempdir_in(&data)?;
         let download = stage.path().join("download");
         if fs::symlink_metadata(&cached).is_ok() {
-            copy_cached(&cached, &download, &asset)?;
+            copy_cached(&cached, &download, asset)?;
         } else {
             // An unverified cache entry is not overwritten or trusted.
             ensure!(
@@ -297,20 +257,23 @@ pub fn install() -> Result<()> {
             out.flush()?;
             out.sync_all()?;
             ensure!(
-                n == asset.bytes && verified(&download, &asset),
+                n == asset.bytes && verified(&download, asset),
                 "SHA-256/size verification failed for {}",
                 asset.id
             );
             let cache_stage = stage.path().join("cache-publication");
-            copy_verified(&download, &cache_stage, &asset)?;
+            copy_verified(&download, &cache_stage, asset)?;
             crate::paths::publish_noclobber(&cache_stage, &cached)?;
         }
         match asset.format {
             Format::File => {
-                let target = models.join(&asset.file);
+                let target = models.join(asset.runtime_path());
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 if target.exists() {
                     ensure!(
-                        verified(&target, &asset),
+                        verified(&target, asset),
                         "Existing model {} differs; remove it explicitly and retry",
                         target.display()
                     );
@@ -319,26 +282,46 @@ pub fn install() -> Result<()> {
                 }
             }
             Format::TarBz2 => {
+                let root_name = asset.install_root()?;
                 let extracted = stage.path().join("extracted");
                 fs::create_dir(&extracted)?;
                 extract(
                     bzip2::read::BzDecoder::new(File::open(&download)?),
                     &extracted,
+                    root_name,
                 )?;
-                let root = extracted.join(PIPER_ROOT);
+                let root = extracted.join(root_name);
+                let model = inventory::archive_relative(asset.runtime_path(), root_name)?;
+                let tokens = inventory::archive_relative(
+                    asset
+                        .tokens_path()
+                        .context("Archive asset is missing its tokens path")?,
+                    root_name,
+                )?;
+                let data_dir = inventory::archive_relative(
+                    asset
+                        .data_dir()
+                        .context("Archive asset is missing its data directory")?,
+                    root_name,
+                )?;
                 ensure!(
-                    root.join("en_US-lessac-medium.onnx").is_file()
-                        && root.join("tokens.txt").is_file()
-                        && root.join("espeak-ng-data").is_dir(),
-                    "Piper archive is missing required files"
+                    root.join(model).is_file()
+                        && root.join(tokens).is_file()
+                        && root.join(data_dir).is_dir(),
+                    "Archive is missing required runtime files"
                 );
-                let tts = models.join("tts");
-                fs::create_dir_all(&tts)?;
-                let target = tts.join(PIPER_ROOT);
+                let target = models.join(
+                    Path::new(asset.runtime_path())
+                        .parent()
+                        .context("Archive runtime path has no parent")?,
+                );
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 if target.exists() {
                     ensure!(
                         same_tree(&root, &target)?,
-                        "Existing Piper directory differs; remove {} explicitly and retry",
+                        "Existing model directory differs; remove {} explicitly and retry",
                         target.display()
                     );
                 } else {
@@ -377,6 +360,12 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(content)),
             bytes: content.len() as u64,
             format: Format::File,
+            install: None,
+            runtime: inventory::RuntimeAsset {
+                path: "fixture.bin".into(),
+                tokens: None,
+                data_dir: None,
+            },
         }
     }
 
@@ -452,24 +441,12 @@ mod tests {
     }
     #[test]
     fn compiled_inventory_is_pinned() {
-        let inv: Inventory = serde_json::from_str(INVENTORY).unwrap();
+        let inv = Inventory::load().unwrap();
         assert_eq!(inv.assets.len(), 4);
         assert!(inv
             .assets
             .iter()
             .all(|a| a.url.starts_with("https://") && a.sha256.len() == 64 && a.bytes > 0));
-    }
-    #[test]
-    fn rejects_traversal_and_cross_platform_paths() {
-        for path in [
-            "../escape",
-            "/absolute",
-            "dir/../escape",
-            "C:/escape",
-            "dir\\escape",
-        ] {
-            assert!(!safe_path(Path::new(path)), "{path}");
-        }
     }
     #[test]
     fn rejects_links_in_archive() {
@@ -480,11 +457,11 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder
-            .append_link(&mut header, format!("{PIPER_ROOT}/link"), "../../escape")
+            .append_link(&mut header, "voice/link", "../../escape")
             .unwrap();
         let archive = builder.into_inner().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        assert!(extract(archive.as_slice(), dest.path()).is_err());
+        assert!(extract(archive.as_slice(), dest.path(), "voice").is_err());
     }
     #[test]
     fn extraction_only_creates_regular_files() {
@@ -494,13 +471,13 @@ mod tests {
         header.set_mode(0o777);
         header.set_cksum();
         builder
-            .append_data(&mut header, format!("{PIPER_ROOT}/tokens.txt"), &b"abc"[..])
+            .append_data(&mut header, "voice/tokens.txt", &b"abc"[..])
             .unwrap();
         let archive = builder.into_inner().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        extract(archive.as_slice(), dest.path()).unwrap();
+        extract(archive.as_slice(), dest.path(), "voice").unwrap();
         assert_eq!(
-            fs::read(dest.path().join(PIPER_ROOT).join("tokens.txt")).unwrap(),
+            fs::read(dest.path().join("voice").join("tokens.txt")).unwrap(),
             b"abc"
         );
     }

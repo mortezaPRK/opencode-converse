@@ -31,6 +31,8 @@ Speech assets need separate verification:
 | Whisper English | Exact weights, upstream license and notices           |
 | Piper Lessac    | Exact voice model card, dataset terms and attribution |
 
-No model weights are included in the npm package. Do not publish native release
-bundles or advertise a complete third-party license audit until exact-artifact
-review is complete.
+No model weights are included in the npm package. The package may include a
+prebuilt engine and its shared libraries under `assets/bin/`; those are
+third-party-bearing artifacts and require exact-artifact license review before
+redistribution. Do not publish native release bundles or advertise a complete
+third-party license audit until that review is complete.

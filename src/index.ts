@@ -1,3 +1,5 @@
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Plugin } from "@opencode/plugin";
 import { Converse } from "./rpc.js";
 import {
@@ -6,10 +8,15 @@ import {
   SUPERVISOR_PROMPT,
   TOOL_DESCRIPTIONS,
   TOOL_SCHEMAS,
+  WORKER_AGENT,
+  WORKER_PROMPT,
   parseOptions,
   watchWorkers,
   type ToolName,
 } from "./supervisor.js";
+
+/** dist/index.js -> package root. */
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 export default Plugin.define({
   id: "converse",
@@ -29,6 +36,19 @@ export default Plugin.define({
             agent.permissions = [
               { action: "*", resource: "*", effect: "deny" },
               { action: "converse", resource: "*", effect: "allow" },
+            ];
+          });
+          editor.update(WORKER_AGENT, (agent) => {
+            agent.description = "Coding worker for OpenCode Converse voice sessions";
+            agent.mode = "primary";
+            agent.hidden = true;
+            agent.system = WORKER_PROMPT;
+            agent.permissions = [
+              { action: "*", resource: "*", effect: "allow" },
+              { action: "converse", resource: "*", effect: "deny" },
+              { action: "read", resource: "*.env", effect: "ask" },
+              { action: "read", resource: "*.env.*", effect: "ask" },
+              { action: "read", resource: "*.env.example", effect: "allow" },
             ];
           });
         }),
@@ -69,8 +89,8 @@ export default Plugin.define({
       );
       registrations.push(
         await ctx.rpc.register(Converse, {
-          hello: async () => ({ protocol: 1 as const }),
-          start: async (input) => supervisor.start(input.model),
+          hello: async () => ({ protocol: 1 as const, packageRoot: PACKAGE_ROOT }),
+          start: async () => supervisor.start(),
           stop: async (input) => supervisor.stop(input.sessionID),
         }),
       );

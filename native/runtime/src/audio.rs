@@ -64,20 +64,26 @@ fn update_capture<T>(
 
 /// Explicit test-only model smoke test. Never opens audio devices or logs recognized text.
 pub fn test_only_inference() -> anyhow::Result<()> {
+    let settings = crate::protocol::Settings::default();
     let _lock = crate::paths::lock()?;
     let models = crate::paths::check_models()?;
     ve_asr::silence_logs();
-    let mut vad = ve_vad::SileroVad::from_model(&models.join("silero_vad.onnx"))?;
+    let mut vad = ve_vad::SileroVad::from_model(&models.vad)?;
     anyhow::ensure!(
         vad.prob(&[0.0; 512])?.is_finite(),
         "VAD produced a non-finite probability"
     );
-    let turn = ve_turn::SmartTurn::from_model(&models.join("smart-turn-v3.2-cpu.onnx"))?;
+    let turn = ve_turn::SmartTurn::from_model(&models.turn)?;
     anyhow::ensure!(
         turn.prob(&[0.0; 16_000])?.is_finite(),
         "Turn model produced a non-finite probability"
     );
-    let mut tts = ve_tts::Tts::new(models.join("tts"))?;
+    let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
+        model: models.tts.model.clone(),
+        tokens: models.tts.tokens.clone(),
+        data_dir: models.tts.data_dir.clone(),
+        num_threads: crate::paths::DEFAULT_TTS_THREADS as i32,
+    })?;
     let samples = tts.synth(
         "Hello. The local speech test is complete.",
         Arc::new(AtomicBool::new(false)),
@@ -87,9 +93,11 @@ pub fn test_only_inference() -> anyhow::Result<()> {
     let mut samples = resampler.process(&samples);
     samples.extend(resampler.flush());
     let mut asr = ve_asr::WhisperAsr::from_config(ve_asr::AsrConfig {
-        model_path: models.join("ggml-base.en.bin"),
-        n_threads: 4,
-        use_gpu: cfg!(target_os = "macos"),
+        model_path: models.asr.clone(),
+        n_threads: settings
+            .asr_threads
+            .unwrap_or(crate::paths::DEFAULT_ASR_THREADS) as i32,
+        use_gpu: settings.use_gpu.unwrap_or(cfg!(target_os = "macos")),
     })?;
     let recognized = asr.transcribe(&samples)?;
     anyhow::ensure!(
@@ -249,16 +257,24 @@ impl Backend {
             let result = (|| -> anyhow::Result<()> {
                 let models = crate::paths::check_models()?;
                 ve_asr::silence_logs();
-                let mut detector = turn::TurnDetector::new(
-                    &models.join("silero_vad.onnx"),
-                    &models.join("smart-turn-v3.2-cpu.onnx"),
-                )?;
+                let mut detector = turn::TurnDetector::new(&models.vad, &models.turn)?;
                 let mut asr = ve_asr::WhisperAsr::from_config(ve_asr::AsrConfig {
-                    model_path: models.join("ggml-base.en.bin"),
-                    n_threads: 4,
-                    use_gpu: cfg!(target_os = "macos"),
+                    model_path: models.asr.clone(),
+                    n_threads: settings
+                        .asr_threads
+                        .unwrap_or(crate::paths::DEFAULT_ASR_THREADS)
+                        as i32,
+                    use_gpu: settings.use_gpu.unwrap_or(cfg!(target_os = "macos")),
                 })?;
-                let mut tts = ve_tts::Tts::new(models.join("tts"))?;
+                let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
+                    model: models.tts.model.clone(),
+                    tokens: models.tts.tokens.clone(),
+                    data_dir: models.tts.data_dir.clone(),
+                    num_threads: settings
+                        .tts_threads
+                        .unwrap_or(crate::paths::DEFAULT_TTS_THREADS)
+                        as i32,
+                })?;
                 let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 48_000)?;
                 let (capture_tx, capture_rx) = mpsc::sync_channel::<(u64, u64, Vec<f32>)>(64);
                 let (asr_tx, asr_rx) = mpsc::sync_channel::<AsrJob>(1);
@@ -347,7 +363,11 @@ impl Backend {
                                 },
                             )?;
                             if capture.as_ref().is_some_and(ve_audio::Capture::failed) {
-                                anyhow::bail!("Input audio stream failed");
+                                let detail = capture
+                                    .as_ref()
+                                    .and_then(ve_audio::Capture::failure)
+                                    .unwrap_or_else(|| "the device reported no reason".into());
+                                anyhow::bail!("Input audio stream failed: {detail}");
                             }
                             std::thread::sleep(Duration::from_millis(10));
                         }
