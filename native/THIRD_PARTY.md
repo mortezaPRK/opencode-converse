@@ -1,18 +1,7 @@
 # Native dependency and model notices
 
-The engine's Cargo manifests declare MIT licensing. Audio/inference source was
-selectively derived from the MIT-declared Rust engine originally imported from
-https://github.com/mortezaPRK/live-speech at
-`c0cf67d22626d7cd4492c6930b5536973820093a`. The private repository and that
-revision were verified through authenticated GitHub API access; an anonymous
-404 is not evidence that the revision is nonexistent. The revision's
-`voice-engine/Cargo.toml` declares `license = "MIT"` for the workspace, but its
-recursive tree contains no LICENSE/COPYING file. Manifest declarations and
-revision existence are provenance evidence, **not a completed license audit**.
-Verification of the actual upstream license grant and required copyright/notices
-remains a redistribution gate. No private source is made public by this notice.
-This is not a runtime dependency. The project license does not relicense
-third-party code or models downloaded by the user.
+The engine's Cargo manifests declare MIT licensing. The project license does
+not relicense third-party code or models downloaded by the user.
 
 ## Log-mel frontend and reference fixtures
 
