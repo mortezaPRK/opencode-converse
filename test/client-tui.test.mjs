@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createTui } from "../dist/tui.js";
@@ -264,8 +265,8 @@ test("TUI hands configured inference tuning to the bridge", async () => {
   await s.run("start");
   assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2 });
   assert.equal(
-    `${s.bridges[0].options.packageRoot}/`,
-    fileURLToPath(new URL("../", import.meta.url)),
+    resolve(s.bridges[0].options.packageRoot),
+    resolve(fileURLToPath(new URL("../", import.meta.url))),
   );
   s.release();
   await s.cleanup();
