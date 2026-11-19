@@ -1,9 +1,9 @@
 # Speech and audio stack research — November 2026
 
-Status: **research, partly implemented** as of 19 November 2026 (engine 0.5.0). The original document of
+Status: **research, partly implemented** as of 19 November 2026 (engine 0.6.0). The original document of
 18 November 2026 was research only. Since then: Piper/sherpa-onnx was replaced by Gradium Phonon 31M (`ptts`); Whisper `base.en` was replaced by Moonshine v2 Small Streaming (§6.4, phase one);
 played/generated sample accounting reports what was actually heard on interrupt; `endpointing: responsive|patient`
-was added; spoken output can be paused; engine 0.4.0 adds a cached neutral acknowledgement (§5.4/§6, `acknowledgement: auto|off`) and an earlier first chunk (clause cut after ≥4 words); Silero VAD was already v6.2; engine 0.5.0 adds WebRTC AEC3 echo cancellation (§4.4/§6.3, `echoCancellation: on|off`) with a relaxed barge-in guard. Sections describing Piper are the
+was added; spoken output can be paused; engine 0.4.0 adds a cached neutral acknowledgement (§5.4/§6, `acknowledgement: auto|off`) and an earlier first chunk (clause cut after ≥4 words); Silero VAD was already v6.2; engine 0.6.0 adds named voice agents with per-speaker Phonon voices (see `multi-agent-voice.md`); engine 0.5.0 added WebRTC AEC3 echo cancellation (§4.4/§6.3, `echoCancellation: on|off`) with a relaxed barge-in guard. Sections describing Piper are the
 pre-change baseline. The document exists to make future changes cheap to justify and easy to
 reject.
 

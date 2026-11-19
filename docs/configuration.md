@@ -95,6 +95,56 @@ without touching its work; stopping the conversation detaches all. Sessions foll
 normal OpenCode permission behavior: the user approves or rejects requests on
 screen.
 
+## Agents
+
+`agents` defines the conversation's named voice agents. It is optional: without it
+there is one agent in the engine's default voice, exactly as before. The roster is
+read when the conversation starts and is fixed for its lifetime; to change it,
+edit the option and start a new conversation.
+
+```jsonc
+"agents": [
+  { "name": "Ada", "voice": "zoey", "agent": "plan", "prompt": "You review designs." },
+  { "name": "Grace", "voice": "easton", "model": "provider/other-model" }
+]
+```
+
+| Field    | Rules                                                                                                                                                                            |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`   | Required. 2 to 16 ASCII letters, unique ignoring case. Reserved words (stop, mute, pause, resume, start, attach, detach, user, assistant, everyone, all, system) are rejected.   |
+| `voice`  | One of `zoey`, `maeve`, `easton`, `preston`, unique per agent. Omitted: the first unused voice in that order.                                                                    |
+| `agent`  | OpenCode primary agent this agent's own session runs as. Checked against the server's visible primary agents when the conversation starts. Omitted: the hidden `converse` agent. |
+| `model`  | Model for this agent's session. Omitted: `supervisorModel`.                                                                                                                      |
+| `prompt` | Extra instructions for this agent only, at most 1000 characters.                                                                                                                 |
+
+Up to four agents. Each agent has its **own OpenCode session**, created lazily the
+first time it is addressed (the first agent's is created at start), with its agent
+and model fixed at creation: OpenCode's prompt API has no per-prompt agent, so
+Converse never switches an existing session's agent. An agent follows other
+sessions only through plugin storage, with its own follow list, and never owns or
+changes them. Setting `agent` to a custom agent means that agent's own permissions
+apply to the voice session; the Converse tools and instructions are added to it
+because Converse owns the session, never to any other session.
+
+**Addressing.** Say a name first ("Ada, check the build") or last after a comma
+("check the build, Ada"). The engine matches the name tolerantly (case, punctuation,
+and small spelling variants such as "Gracie"; names under four letters must match
+exactly), removes it from the prompt, and sends the prompt to that agent's session.
+A name in the middle of a sentence ("ask Grace to check it") does not address
+anyone. When you name nobody, **the first configured agent answers**. The
+acknowledgement cue and the reply are spoken in the addressee's voice.
+
+**What each agent sees.** Its own session, and the prompts addressed to it, plus a
+short bounded digest of the other voices: at most the last 6 lines from other
+agents (and your lines addressed to them), each clipped to 160 characters, in at
+most 1.5 KB, marked as context rather than instructions. Agents never see the whole
+conversation.
+
+**One voice at a time.** The engine keeps a single floor. If another agent's reply
+arrives while one is speaking, it is queued (at most 8 items and 64 KiB) and spoken
+afterwards in its own voice; speaking over them cancels the active and the queued
+speech. Agents do not yet talk to each other.
+
 ## Speech model inventory
 
 Speech model names, roles, URLs, sizes, and hashes live only in
@@ -108,6 +158,11 @@ Its weights, tokenizer, and default voice are Apache-2.0; see
 (English, MIT), also a pinned directory installed under
 `<state>/models/asr-moonshine-small-streaming-en` and loaded by the engine's own
 ONNX Runtime code.
+
+The four shipped voices are Apache-2.0 Phonon voice embeddings from
+`gradium/phonon-voices` (a pinned commit, individually hashed in `assets/models.json`)
+installed under `<state>/models/tts-phonon-voices-en`. They are loaded by the same
+local-files-only synthesizer as the default voice.
 
 Install the pinned defaults with the engine installed in the state folder:
 

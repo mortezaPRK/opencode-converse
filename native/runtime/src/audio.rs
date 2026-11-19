@@ -15,11 +15,13 @@ enum Job {
     Speak {
         epoch: u64,
         text: String,
+        voice: String,
         cancel: Arc<AtomicBool>,
     },
     Ack {
         epoch: u64,
         index: usize,
+        voice: String,
         cancel: Arc<AtomicBool>,
     },
     Finish(u64),
@@ -28,6 +30,8 @@ enum Job {
 struct Playback {
     audio: Option<Arc<ve_audio::AudioIo>>,
     generation: crate::generation::Generation,
+    /// Voice for jobs queued from now on; `Cancel` resets it to the default.
+    voice: String,
     /// Kept here so a pause requested before the device opens still applies.
     paused: bool,
     /// Device totals at the last cancellation; progress is reported relative to it.
@@ -37,6 +41,16 @@ struct Playback {
     chunks: Vec<(String, u64)>,
     chunk_bytes: usize,
     chunks_overflowed: bool,
+}
+
+impl Playback {
+    fn voice_or_default(&self) -> String {
+        if self.voice.is_empty() {
+            "default".into()
+        } else {
+            self.voice.clone()
+        }
+    }
 }
 
 /// Longest cached acknowledgement phrase. Three phrases of at most this length
@@ -50,14 +64,15 @@ fn ack_fits(samples: usize, rate: usize) -> bool {
 
 /// Synthesize each acknowledgement phrase once, as the joined audio a normal
 /// chunk would produce.
-fn synthesize_acks(tts: &mut ve_tts::Tts) -> anyhow::Result<Vec<Vec<f32>>> {
+fn synthesize_acks(tts: &mut ve_tts::Tts, voice: &str) -> anyhow::Result<Vec<Vec<f32>>> {
+    let voice = (voice != "default").then_some(voice);
     let rate = tts.sample_rate() as usize;
     let never = AtomicBool::new(false);
     let mut cache = Vec::with_capacity(crate::controller::ACK_PHRASES.len());
     for text in crate::controller::ACK_PHRASES {
         let mut joiner = ve_tts::Joiner::new(tts.sample_rate());
         let mut audio = Vec::new();
-        tts.synth_stream(text, &never, |part| {
+        tts.synth_stream_voice(text, voice, &never, |part| {
             audio.extend(joiner.push_part(part));
             Ok(())
         })?;
@@ -199,6 +214,7 @@ pub fn test_only_inference() -> anyhow::Result<()> {
     );
     let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
         dir: models.tts.dir.clone(),
+        voices_dir: Some(models.voices.dir.clone()),
     })?;
     let samples = tts.synth(
         "Hello. The local speech test is complete.",
@@ -395,15 +411,32 @@ impl Backend {
                 })?;
                 let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
                     dir: models.tts.dir.clone(),
+                    voices_dir: Some(models.voices.dir.clone()),
                 })?;
                 let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 48_000)?;
-                let acks = if settings.acknowledgement
-                    == Some(crate::protocol::AcknowledgementSetting::Off)
-                {
-                    Vec::new()
-                } else {
-                    synthesize_acks(&mut tts)?
-                };
+                let roster = settings
+                    .participants
+                    .clone()
+                    .unwrap_or_else(|| vec![crate::protocol::Participant::implicit()]);
+                let registered = tts.voices();
+                for participant in &roster {
+                    anyhow::ensure!(
+                        registered.contains(&participant.voice),
+                        "Voice {} is not installed; run opencode-converse models install",
+                        participant.voice
+                    );
+                }
+                // Cached acknowledgements per distinct voice, so the addressee acknowledges
+                // in its own voice.
+                let mut acks: std::collections::HashMap<String, Vec<Vec<f32>>> = Default::default();
+                if settings.acknowledgement != Some(crate::protocol::AcknowledgementSetting::Off) {
+                    for participant in &roster {
+                        if !acks.contains_key(&participant.voice) {
+                            let cache = synthesize_acks(&mut tts, &participant.voice)?;
+                            acks.insert(participant.voice.clone(), cache);
+                        }
+                    }
+                }
                 let (capture_tx, capture_rx) = mpsc::sync_channel::<(u64, u64, Vec<f32>)>(64);
                 let (asr_tx, asr_rx) = mpsc::sync_channel::<AsrJob>(1);
                 let asr_events = events.clone();
@@ -651,6 +684,7 @@ impl Backend {
                         Job::Speak {
                             epoch,
                             text,
+                            voice,
                             cancel,
                         } => {
                             if cancel.load(Ordering::Acquire) {
@@ -689,7 +723,8 @@ impl Backend {
                                 }
                                 Ok(())
                             };
-                            let finish = tts.synth_stream(&text, &cancel, |part| {
+                            let voice = (voice != "default").then_some(voice.as_str());
+                            let finish = tts.synth_stream_voice(&text, voice, &cancel, |part| {
                                 let joined = joiner.push_part(part);
                                 play(&resampler.process(&joined))
                             })?;
@@ -704,9 +739,11 @@ impl Backend {
                         Job::Ack {
                             epoch,
                             index,
+                            voice,
                             cancel,
                         } => {
-                            let Some(cached) = acks.get(index) else {
+                            let Some(cached) = acks.get(&voice).and_then(|set| set.get(index))
+                            else {
                                 continue;
                             };
                             if cancel.load(Ordering::Acquire) {
@@ -807,6 +844,7 @@ impl Backend {
                 self.pending_finish.store(0, Ordering::Release);
                 let mut state = self.playback.lock().unwrap();
                 state.generation.cancel(epoch);
+                state.voice.clear();
                 if let Some(audio) = &state.audio {
                     audio.flush_output();
                     state.base = audio.playback_progress();
@@ -829,7 +867,9 @@ impl Backend {
                 // already canceled when the old capture fence is retired.
                 state.generation = Default::default();
                 state.generation.cancel(epoch);
+                state.voice.clear();
             }
+            Action::Voice(voice) => self.playback.lock().unwrap().voice = voice,
             Action::Speak(text) => {
                 let mut state = self.playback.lock().unwrap();
                 if let Some(cancel) = state.generation.token(epoch) {
@@ -838,6 +878,7 @@ impl Backend {
                         .try_send(Job::Speak {
                             epoch,
                             text,
+                            voice: state.voice_or_default(),
                             cancel,
                         })
                         .is_err()
@@ -854,9 +895,11 @@ impl Backend {
                 let mut state = self.playback.lock().unwrap();
                 if let Some(cancel) = state.generation.token(epoch) {
                     // Best effort: a full queue just means the reply is already speaking.
+                    let voice = state.voice_or_default();
                     let _ = self.jobs.try_send(Job::Ack {
                         epoch,
                         index,
+                        voice,
                         cancel,
                     });
                 }

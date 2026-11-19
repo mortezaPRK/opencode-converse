@@ -23,6 +23,10 @@ The current SDK target is OpenCode **2.3.0**.
   and never owns other sessions. Sessions it creates default to a hidden
   `converse-worker` agent, which is only their creation-time agent; no session
   is ever branded, hidden, retitled, or switched to another agent.
+- A conversation can have up to four named voice agents (`agents` option). Each has
+  its own voice and its own OpenCode session; you address one by name, and with no
+  name the first agent answers. Rust owns addressing, the speaking floor, and the
+  per-speaker voice; the plugin only routes each prompt to the addressee's session.
 - English speech is the initial scope. Permission requests are announced, but
   approvals happen in OpenCode's normal interface.
 - The microphone starts only on an explicit command. Stopping a conversation
@@ -168,7 +172,10 @@ There is no engine, data, or model path option and no `CONVERSE_BIN` override.
 The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
 versions. `asrThreads`, `ttsThreads`, `endpointing`, `acknowledgement`, and `echoCancellation` are the only runtime tuning
-options. OpenCode owns provider credentials; they are never passed to the Rust
+options, plus `agents` (see [`docs/configuration.md`](docs/configuration.md#agents)),
+for example `"agents": [{ "name": "Ada", "voice": "zoey" }, { "name": "Grace", "voice": "easton" }]`.
+Say "Ada, …" or "…, Grace" to address one; unnamed speech goes to the first agent.
+OpenCode owns provider credentials; they are never passed to the Rust
 process. Device preferences stay in host storage.
 
 Each conversation keeps its original server and workspace target. Changing tabs

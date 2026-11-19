@@ -2,6 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { Plugin } from "@opencode/plugin/tui";
+import { speakerSuffix } from "./roster-view.js";
 import { createBridge, isStoppedError, type Snapshot } from "./client/bridge.js";
 import { localSettings } from "./client/runtime.js";
 import { parseRuntimeConfig } from "./config.js";
@@ -23,6 +24,8 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         interrupted: null,
         serverID: null,
         transcript: [],
+        participants: [],
+        speaker: null,
       });
       // A failed turn or start leaves the engine idle, so the error outlives the
       // status change but never the conversation: it lapses on its own timer.
@@ -163,7 +166,11 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
           <text wrapMode="none">
             <Glyph />
             <span style={{ fg: ctx.theme.text.base }}>Converse</span>
-            <span style={{ fg: ctx.theme.text.muted }}> · {view().label}</span>
+            <span style={{ fg: ctx.theme.text.muted }}>
+              {" "}
+              · {view().label}
+              {speakerSuffix(state())}
+            </span>
           </text>
         </box>
       );
@@ -187,6 +194,7 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
               <text fg={toneColor(view().tone)} wrapMode="none">
                 <Glyph />
                 {view().label}
+                {speakerSuffix(state())}
               </text>
             </box>
             <text fg={ctx.theme.text.muted}>{view().detail}</text>

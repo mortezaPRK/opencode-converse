@@ -1,5 +1,5 @@
 /** The single stdio contract. Both ends must use exactly this protocol version. */
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 
 export type VoiceStatus =
   | "off"
@@ -10,8 +10,13 @@ export type VoiceStatus =
   | "speaking"
   | "muted";
 
+export type { Participant } from "./config.js";
+import type { Participant } from "./config.js";
+
 /** Local host preferences sent over stdio. Server credentials never appear here. */
 export interface LocalSettings {
+  /** The conversation's fixed roster; absent means one agent speaking the default voice. */
+  participants?: readonly Participant[];
   inputDevice?: string;
   outputDevice?: string;
   asrThreads?: number;
@@ -31,12 +36,27 @@ export type Acknowledgement = "auto" | "off";
 export type EchoCancellation = "on" | "off";
 
 export type EngineMessage =
-  | { type: "hello"; protocol: 1 }
-  | { type: "status"; state: Exclude<VoiceStatus, "off"> }
-  | { type: "prompt"; turn: number; text: string }
+  | { type: "hello"; protocol: 2 }
+  | {
+      type: "status";
+      state: Exclude<VoiceStatus, "off">;
+      /** Participant the state is about: the addressee while thinking, the voice while speaking. */
+      speaker?: string;
+    }
+  | {
+      type: "prompt";
+      turn: number;
+      /** Participant the user addressed; the first participant when no name was spoken. */
+      speaker: string;
+      addressed: boolean;
+      /** The transcript with the spoken name removed. */
+      text: string;
+    }
   | {
       type: "interrupt";
       turn: number;
+      /** Participant that held the floor or was addressed when the user cut in. */
+      speaker?: string;
       /** Reply audio the output device actually played before the cut-off. */
       played_ms?: number;
       /** Reply audio generated for playback; `played_ms <= generated_ms`. */
@@ -47,10 +67,10 @@ export type EngineMessage =
   | { type: "error"; code: string; message: string; fatal: boolean };
 
 export type HostMessage =
-  | { type: "init"; protocol: 1; settings: LocalSettings }
-  | { type: "reply_delta"; turn: number; reply: string; text: string }
-  | { type: "reply_end"; turn: number; reply: string; text: string }
-  | { type: "announcement"; reply: string; text: string }
+  | { type: "init"; protocol: 2; settings: LocalSettings }
+  | { type: "reply_delta"; turn: number; speaker: string; reply: string; text: string }
+  | { type: "reply_end"; turn: number; speaker: string; reply: string; text: string }
+  | { type: "announcement"; speaker: string; reply: string; text: string }
   | {
       type: "turn_end";
       turn: number;

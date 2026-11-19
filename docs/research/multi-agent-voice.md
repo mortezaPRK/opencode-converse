@@ -1,6 +1,15 @@
 # Multiple named voice agents in one conversation
 
-Status: design only. Nothing here is implemented.
+Status (19 November 2026): **phases 0 and 1 implemented in engine 0.6.0; phases 2 and 3 are design only.**
+Decisions that changed the design below:
+
+- The SDK has no per-prompt agent, so each named agent's session is created with its OpenCode agent and model and never switched (§2.1, §2.3 and §3 phase 0 are superseded on that point).
+- No name means the **first configured agent**, not the last speaker (§2.2, §4 question 2).
+- Addressing lives in Rust (`native/runtime/src/addressing.rs`), not TypeScript: it is conversation state plus text shaping, and the ack voice needs the addressee before any reply. The engine's `prompt` carries `speaker`, `addressed`, and the name-stripped text.
+- Voices shipped: `zoey`, `maeve`, `easton`, `preston` (pinned in `assets/models.json`; chosen by description and measured pitch, not yet by ear).
+- Measured with `ptts 0.7.1` and `phonon-31m-en` on this machine: embeddings from `gradium/phonon-voices` load with `Synth::add_voice_file`; the first request per voice costs about 50-90 ms to first audio, later ones about 20-35 ms, the same as repeating one voice.
+- Protocol is version 2: `init.settings.participants`, a `speaker` on `reply_delta`/`reply_end`/`announcement`, and `speaker` on `status`/`interrupt`/`prompt`.
+- Phase 2 hooks: the controller's floor queue (bounded replies from non-holders, promoted when the floor frees), the per-lane `Turn.lane` in `src/client/bridge.ts`, and `attach(sessionID, participantID)`. Agent-to-agent routing, the chain budget, TTL/priority and the prompter lock are not implemented.
 
 ## 1. Current architecture (short)
 

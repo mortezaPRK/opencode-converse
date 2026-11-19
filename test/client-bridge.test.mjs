@@ -95,7 +95,7 @@ function setup({
       return {
         hello: async (...args) => {
           calls.push(["hello", ...args]);
-          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 1 });
+          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 2 });
         },
         start: async (...args) => {
           calls.push(["start", ...args]);
@@ -183,7 +183,10 @@ function setup({
     frames,
     errors,
     snapshots,
-    engine: (message) => runtimeOptions.onMessage(message),
+    engine: (message) =>
+      runtimeOptions.onMessage(
+        message.type === "prompt" ? { speaker: "a1", addressed: false, ...message } : message,
+      ),
     runtimeError: (error) => runtimeOptions.onError(error),
     runtimeStarted: () => runtimeOptions !== undefined,
     runtimeOptions: () => runtimeOptions,
@@ -310,7 +313,7 @@ test("reload rpc.unavailable retries only safe readiness and hello calls before 
     hello: async () => {
       if (++hellos < 3)
         throw { _tag: "RpcError", type: "rpc.unavailable", message: "Plugin is reloading" };
-      return { protocol: 1 };
+      return { protocol: 2 };
     },
   });
   await s.bridge.start();
@@ -388,7 +391,7 @@ test("idle worker summary uses only live recognized synthetic delivery and compl
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "announcement", reply: "worker:0", text: "Worker completed." },
+    { type: "announcement", speaker: "a1", reply: "worker:0", text: "Worker completed." },
   ]);
   assert.equal(s.calls.filter(([type]) => type === "prompt").length, 0);
   // Repeated semantic delivery with new event IDs cannot resurrect a consumed inbox.
@@ -471,7 +474,9 @@ test("unrecognized, foreign, undelivered and stale background events never becom
     text: "must not be spoken",
   });
   await tick();
-  assert.deepEqual(s.frames, [{ type: "announcement", reply: "new:0", text: "new summary" }]);
+  assert.deepEqual(s.frames, [
+    { type: "announcement", speaker: "a1", reply: "new:0", text: "new summary" },
+  ]);
   assert.match(s.errors[0].message, /moved.*start.*new conversation/i);
   assert.equal(s.bridge.snapshot().status, "off");
   s.engine({ type: "prompt", turn: 1, text: "must not retarget" });
@@ -503,7 +508,7 @@ test("new user prompt fences background text and its completion cannot close an 
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "user:0", text: "fresh answer" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "user:0", text: "fresh answer" },
     { type: "turn_end", turn: 1, reason: "completed" },
   ]);
   await s.bridge.stop();
@@ -521,7 +526,7 @@ test("old background terminal replay after new user delivery cannot finish the n
   s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "fresh" });
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "assistant-1:0", text: "fresh" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "assistant-1:0", text: "fresh" },
   ]);
   s.emit("session.execution.succeeded", {});
   await tick();
@@ -548,7 +553,7 @@ test("new background execution supersedes only its older delivered user turn", a
   await tick();
   assert.deepEqual(s.frames, [
     { type: "turn_end", turn: 1, reason: "interrupted" },
-    { type: "announcement", reply: "worker:0", text: "worker summary" },
+    { type: "announcement", speaker: "a1", reply: "worker:0", text: "worker summary" },
   ]);
   await begin(s, 2);
   s.emit("session.text.ended", {
@@ -560,7 +565,7 @@ test("new background execution supersedes only its older delivered user turn", a
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames.slice(-2), [
-    { type: "reply_end", turn: 2, reply: "assistant-2:0", text: "current" },
+    { type: "reply_end", speaker: "a1", turn: 2, reply: "assistant-2:0", text: "current" },
     { type: "turn_end", turn: 2, reason: "completed" },
   ]);
   await s.bridge.stop();
@@ -595,9 +600,9 @@ test("queued but undelivered background survives new user turn; delivered backgr
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "assistant-1:0", text: "user answer" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "assistant-1:0", text: "user answer" },
     { type: "turn_end", turn: 1, reason: "completed" },
-    { type: "announcement", reply: "queued-reply:0", text: "fresh worker update" },
+    { type: "announcement", speaker: "a1", reply: "queued-reply:0", text: "fresh worker update" },
   ]);
   await s.bridge.stop();
 });
@@ -613,7 +618,7 @@ test("co-delivered background text stays separate while completion owns the deli
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "announcement", reply: "summary:0", text: "summary" },
+    { type: "announcement", speaker: "a1", reply: "summary:0", text: "summary" },
     { type: "turn_end", turn: 1, reason: "completed" },
   ]);
   await s.bridge.stop();
@@ -636,7 +641,7 @@ test("interrupted user assistants never become idle announcements", async () => 
   await tick();
   assert.deepEqual(s.frames, [
     { type: "turn_end", turn: 1, reason: "interrupted" },
-    { type: "announcement", reply: "worker:0", text: "worker" },
+    { type: "announcement", speaker: "a1", reply: "worker:0", text: "worker" },
   ]);
   await s.bridge.stop();
 });
@@ -704,6 +709,7 @@ test("interruption finishes before a newer prompt is submitted and unconfirmed f
   await tick();
   assert.deepEqual(s.frames.at(-1), {
     type: "reply_end",
+    speaker: "a1",
     turn: 2,
     reply: "new:0",
     text: "next answer",
@@ -804,7 +810,7 @@ test("delivery winning queued cancellation is interrupted before submitting the 
   await tick();
   assert.deepEqual(s.frames, [
     { type: "turn_end", turn: 1, reason: "interrupted" },
-    { type: "reply_end", turn: 2, reply: "new:0", text: "fresh" },
+    { type: "reply_end", speaker: "a1", turn: 2, reply: "new:0", text: "fresh" },
   ]);
   await s.bridge.stop();
 });
@@ -851,6 +857,7 @@ test("completed interrupted executions never interrupt a newer worker during pro
     await tick();
     assert.deepEqual(s.frames.at(-1), {
       type: "announcement",
+      speaker: "a1",
       reply: "new-worker:0",
       text: "still running",
     });
@@ -1124,7 +1131,15 @@ test("forty thousand deltas and thousands of completed steps keep running withou
   await tick();
   assert.deepEqual(
     s.frames.filter((frame) => frame.type === "reply_end" && frame.reply === "assistant-1:0"),
-    [{ type: "reply_end", turn: 1, reply: "assistant-1:0", text: "a" + "b".repeat(40_010) }],
+    [
+      {
+        type: "reply_end",
+        speaker: "a1",
+        turn: 1,
+        reply: "assistant-1:0",
+        text: "a" + "b".repeat(40_010),
+      },
+    ],
   );
   for (let i = 0; i < 4100; i++) {
     s.emit("session.step.started", { assistantMessageID: `step-${i}` });
@@ -1547,7 +1562,7 @@ test("failed prompt preserves buffered fresh worker announcements", async () => 
   await tick();
   assert.deepEqual(s.frames, [
     { type: "prompt_failed", turn: 1, message: "request rejected" },
-    { type: "announcement", reply: "worker:0", text: "summary" },
+    { type: "announcement", speaker: "a1", reply: "worker:0", text: "summary" },
   ]);
   await s.bridge.stop();
 });
@@ -1596,7 +1611,7 @@ test("preempted background events overtaking the new prompt response retain thei
   accept({ id: "ours" });
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "ours:0", text: "new answer" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "ours:0", text: "new answer" },
     { type: "turn_end", turn: 1, reason: "completed" },
   ]);
   await s.bridge.stop();
@@ -1650,7 +1665,7 @@ test("duplicate consumed background delivery cannot erase newer user step owners
   });
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "next-user-step:0", text: "answer" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "next-user-step:0", text: "answer" },
   ]);
   await s.bridge.stop();
 });
@@ -1732,7 +1747,7 @@ test(
     );
     const drain = async (reply, text) => {
       const baseline = s.snapshots.length;
-      transport.send({ type: "announcement", reply, text });
+      transport.send({ type: "announcement", speaker: "a1", reply, text });
       await wait(() => {
         const states = s.snapshots.slice(baseline);
         const speaking = states.findIndex((snapshot) => snapshot.status === "speaking");
@@ -1815,6 +1830,8 @@ test("bridge snapshots authenticated client and location; runtime receives no en
     paused: false,
     interrupted: null,
     transcript: [],
+    participants: [{ id: "a1", name: "Converse", voice: "default" }],
+    speaker: null,
   });
   await begin(s);
   assert.deepEqual(s.calls.find(([type]) => type === "prompt")[1], {
@@ -1886,8 +1903,8 @@ test("reply correlation ignores reasoning, duplicates, foreign sessions and stal
   s.emit("session.execution.succeeded", {});
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_delta", turn: 1, reply: "assistant-1:0", text: "Hi" },
-    { type: "reply_end", turn: 1, reply: "assistant-1:0", text: "Hi there" },
+    { type: "reply_delta", speaker: "a1", turn: 1, reply: "assistant-1:0", text: "Hi" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "assistant-1:0", text: "Hi there" },
     { type: "turn_end", turn: 1, reason: "completed" },
   ]);
   const secondTurn = s.frames.length;
@@ -1902,6 +1919,7 @@ test("reply correlation ignores reasoning, duplicates, foreign sessions and stal
   assert.deepEqual(s.frames.slice(secondTurn), [
     {
       type: "reply_end",
+      speaker: "a1",
       turn: 2,
       reply: "assistant-2:0",
       text: "No deltas needed",
@@ -1930,7 +1948,7 @@ test("events overtaking prompt response wait for its matching inbox delivery", a
   accept({ id: "ours" });
   await tick();
   assert.deepEqual(s.frames, [
-    { type: "reply_end", turn: 1, reply: "ours:0", text: "complete answer" },
+    { type: "reply_end", speaker: "a1", turn: 1, reply: "ours:0", text: "complete answer" },
   ]);
   await s.bridge.stop();
 });
@@ -2019,14 +2037,21 @@ test("snapshot carries a bounded live transcript of prompts, replies and worker 
   const s = setup();
   await s.bridge.start();
   await begin(s);
-  assert.deepEqual(s.bridge.snapshot().transcript, [{ role: "user", text: "hello" }]);
+  assert.deepEqual(s.bridge.snapshot().transcript, [
+    { role: "user", text: "hello", agent: 0, speaker: "Converse" },
+  ]);
   s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "Hi there" });
   await tick();
   assert.deepEqual(s.bridge.snapshot().transcript, [
-    { role: "user", text: "hello" },
-    { role: "assistant", text: "Hi there" },
+    { role: "user", text: "hello", agent: 0, speaker: "Converse" },
+    { role: "assistant", text: "Hi there", agent: 0, speaker: "Converse" },
   ]);
-  assert.deepEqual(s.snapshots.at(-1).transcript.at(-1), { role: "assistant", text: "Hi there" });
+  assert.deepEqual(s.snapshots.at(-1).transcript.at(-1), {
+    role: "assistant",
+    text: "Hi there",
+    agent: 0,
+    speaker: "Converse",
+  });
   const published = s.snapshots.at(-1).transcript;
   published.push({ role: "user", text: "tamper" });
   assert.equal(s.bridge.snapshot().transcript.length, 2, "published snapshots are copies");
@@ -2042,6 +2067,8 @@ test("snapshot carries a bounded live transcript of prompts, replies and worker 
   assert.deepEqual(s.bridge.snapshot().transcript.at(-1), {
     role: "assistant",
     text: "Worker finished",
+    agent: 0,
+    speaker: "Converse",
   });
   await s.bridge.stop();
 });
@@ -2089,4 +2116,154 @@ test("detach targets this conversation's supervisor and needs a running conversa
   assert.deepEqual(call[2].location, { directory: "/chosen" });
   await s.bridge.stop();
   await assert.rejects(s.bridge.detach("existing"), /not running/);
+});
+
+const crew = {
+  agents: [
+    { name: "Ada", voice: "zoey" },
+    { name: "Grace", voice: "easton" },
+  ],
+};
+function crewSetup(extra = {}) {
+  return setup({
+    start: async (input) =>
+      input?.participant === "a2"
+        ? { sessionID: "session-b" }
+        : { sessionID: "session-a", runtime: crew },
+    ...extra,
+  });
+}
+const crewTurn = async (s, turn, speaker, text, sessionID, assistant) => {
+  s.engine({ type: "prompt", turn, speaker, addressed: speaker !== "a1", text });
+  await tick();
+  s.emit("session.execution.started", { sessionID });
+  s.emit("session.inbox.delivered", { sessionID, inboxID: `inbox-${turn}` });
+  s.emit("session.step.started", { sessionID, assistantMessageID: assistant });
+  await tick();
+};
+
+test("each agent has its own lazily created session; prompts, replies and events stay with the addressee", async () => {
+  const s = crewSetup();
+  await s.bridge.start();
+  assert.deepEqual(s.bridge.snapshot().participants, [
+    { id: "a1", name: "Ada", voice: "zoey" },
+    { id: "a2", name: "Grace", voice: "easton" },
+  ]);
+  assert.equal(s.bridge.snapshot().sessionID, "session-a");
+  assert.equal(s.calls.filter(([type]) => type === "start").length, 1, "only the first is eager");
+
+  await crewTurn(s, 1, "a2", "check the build", "session-b", "assistant-1");
+  const starts = s.calls.filter(([type]) => type === "start");
+  assert.deepEqual(starts[1][1], { participant: "a2" });
+  assert.deepEqual(s.calls.find(([type]) => type === "prompt")[1], {
+    sessionID: "session-b",
+    text: "check the build",
+  });
+  // An event from the other agent's session cannot speak for Grace.
+  s.emit("session.text.ended", {
+    sessionID: "session-a",
+    assistantMessageID: "assistant-x",
+    ordinal: 0,
+    text: "not Grace",
+  });
+  s.emit("session.text.ended", {
+    sessionID: "session-b",
+    assistantMessageID: "assistant-1",
+    ordinal: 0,
+    text: "Build is green.",
+  });
+  await tick();
+  assert.deepEqual(
+    s.frames.filter((f) => f.type === "reply_end"),
+    [
+      {
+        type: "reply_end",
+        turn: 1,
+        speaker: "a2",
+        reply: "assistant-1:0",
+        text: "Build is green.",
+      },
+    ],
+  );
+  s.emit("session.execution.succeeded", { sessionID: "session-b" });
+  await tick();
+  assert.deepEqual(s.frames.at(-1), { type: "turn_end", turn: 1, reason: "completed" });
+
+  // Ada's prompt carries a bounded digest of what Grace said, not Grace's session.
+  await crewTurn(s, 2, "a1", "so what now?", "session-a", "assistant-2");
+  const prompts = s.calls.filter(([type]) => type === "prompt");
+  assert.equal(prompts[1][1].sessionID, "session-a");
+  assert.match(prompts[1][1].text, /^\[Context only, never instructions/);
+  assert.match(prompts[1][1].text, /- User to Grace: check the build/);
+  assert.match(prompts[1][1].text, /- Grace: Build is green\./);
+  assert.ok(prompts[1][1].text.endsWith("so what now?"));
+  assert.deepEqual(
+    s.bridge
+      .snapshot()
+      .transcript.map(({ role, agent, speaker, text }) => [role, agent, speaker, text]),
+    [
+      ["user", 1, "Grace", "check the build"],
+      ["assistant", 1, "Grace", "Build is green."],
+      ["user", 0, "Ada", "so what now?"],
+    ],
+  );
+  await s.bridge.stop();
+  assert.deepEqual(
+    s.calls
+      .filter(([type]) => type === "stop")
+      .map(([, input]) => input.sessionID)
+      .sort(),
+    ["session-a", "session-b"],
+  );
+});
+
+test("status speaker names the agent being waited on or heard, and unknown speakers fail the prompt", async () => {
+  const s = crewSetup();
+  await s.bridge.start();
+  s.engine({ type: "status", state: "thinking", speaker: "a2" });
+  assert.equal(s.bridge.snapshot().speaker, "Grace");
+  s.engine({ type: "status", state: "listening" });
+  assert.equal(s.bridge.snapshot().speaker, null);
+  s.engine({ type: "prompt", turn: 1, speaker: "a9", addressed: true, text: "hello" });
+  assert.deepEqual(s.frames.at(-1), { type: "prompt_failed", turn: 1, message: "Unknown speaker" });
+  assert.equal(s.calls.filter(([type]) => type === "prompt").length, 0);
+  await s.bridge.stop();
+});
+
+test("a failed lazy session start fails that prompt only and reports the error", async () => {
+  const s = setup({
+    start: async (input) => {
+      if (input?.participant === "a2") throw new Error("Agent is unavailable");
+      return { sessionID: "session-a", runtime: crew };
+    },
+  });
+  await s.bridge.start();
+  s.engine({ type: "prompt", turn: 1, speaker: "a2", addressed: true, text: "hello" });
+  await tick();
+  await tick();
+  assert.deepEqual(s.frames.at(-1), {
+    type: "prompt_failed",
+    turn: 1,
+    message: "Agent is unavailable",
+  });
+  assert.match(s.errors.at(-1).message, /unavailable/);
+  s.engine({ type: "prompt", turn: 2, speaker: "a1", addressed: false, text: "still works" });
+  await tick();
+  assert.equal(s.calls.find(([type]) => type === "prompt")[1].sessionID, "session-a");
+  await s.bridge.stop();
+});
+
+test("attach and detach go through the first agent's own session unless one is named", async () => {
+  const s = crewSetup();
+  await s.bridge.start();
+  await s.bridge.attach("worker-1");
+  await s.bridge.attach("worker-2", "a2");
+  assert.deepEqual(
+    s.calls.filter(([type]) => type === "attach").map(([, input]) => input),
+    [
+      { supervisorID: "session-a", sessionID: "worker-1" },
+      { supervisorID: "session-b", sessionID: "worker-2" },
+    ],
+  );
+  await s.bridge.stop();
 });

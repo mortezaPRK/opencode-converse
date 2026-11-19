@@ -18,6 +18,8 @@ export function createMain(
       sessionID: null,
       interrupted: null,
       transcript: [],
+      participants: [],
+      speaker: null,
     };
     let owner: number | undefined;
     let bridge: ReturnType<typeof createBridge> | undefined;

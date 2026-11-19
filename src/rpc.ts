@@ -48,20 +48,24 @@ export const Converse = Rpc.define({
       input: schema<void>((value) => {
         if (value !== undefined && value !== null) throw new Error("hello takes no input");
       }),
-      output: schema<{ protocol: 1; packageRoot?: string }>((value) => {
+      output: schema<{ protocol: 2; packageRoot?: string }>((value) => {
         const input = object(value);
         keys(input, ["protocol", "packageRoot"]);
-        if (input.protocol !== 1) throw new Error("Unsupported Converse protocol");
+        if (input.protocol !== 2) throw new Error("Unsupported Converse protocol");
         return {
-          protocol: 1,
+          protocol: 2,
           ...(input.packageRoot === undefined ? {} : { packageRoot: nonempty(input.packageRoot) }),
         };
       }),
     },
     start: {
-      input: schema<void>((value) => {
-        if (value !== undefined && value !== null && Object.keys(object(value)).length)
-          throw new Error("start takes no input; configure models through plugin options");
+      input: schema<{ participant?: string } | undefined>((value) => {
+        if (value === undefined || value === null) return undefined;
+        const input = object(value);
+        keys(input, ["participant"]);
+        return input.participant === undefined
+          ? undefined
+          : { participant: nonempty(input.participant) };
       }),
       output: schema<{ sessionID: string; runtime?: RuntimeConfig }>((value) => {
         const input = object(value);

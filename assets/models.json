@@ -5,7 +5,8 @@
     "vad": "silero-vad",
     "turn": "smart-turn",
     "asr": "moonshine-small-streaming-en",
-    "tts": "phonon-31m-en"
+    "tts": "phonon-31m-en",
+    "voices": "phonon-voices-en"
   },
   "assets": [
     {
@@ -130,6 +131,51 @@
       ],
       "runtime": {
         "path": "tts-phonon-31m-en"
+      }
+    },
+    {
+      "id": "phonon-voices-en",
+      "format": "files",
+      "files": [
+        {
+          "path": "zoey.safetensors",
+          "url": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/voices/NbpkqMVS3CJeq2j8.safetensors",
+          "sha256": "97c7f8c253413574406ab80dd23f49c3ebb2517163b00a9bf86b9c4cf43e7e23",
+          "bytes": 256136
+        },
+        {
+          "path": "maeve.safetensors",
+          "url": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/voices/6PWnV0Nq4wu7RVBT.safetensors",
+          "sha256": "56494ee67d533ad227ff0dfd0b1c13ff5aa91f1ad6e596e66c2986ba3005e844",
+          "bytes": 256136
+        },
+        {
+          "path": "easton.safetensors",
+          "url": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/voices/LMDIYE0Oa377Qh6Z.safetensors",
+          "sha256": "45c582673cb20edb04ddcca2b5a8865ddfb0a82599efadb269021e87d20fbdd4",
+          "bytes": 256136
+        },
+        {
+          "path": "preston.safetensors",
+          "url": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/voices/qIxlZ7Ei8KvWlyQH.safetensors",
+          "sha256": "6e04b84d3ae8751b22bca0a4f63936f9cb648f4f2182b2d0788071ea1c0b68a1",
+          "bytes": 256136
+        },
+        {
+          "path": "README.md",
+          "url": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/README.md",
+          "sha256": "0186c7d586a9594db1e0283cb68e84e88bbd9bc3c29047cf0083c7483556f3ee",
+          "bytes": 22625
+        },
+        {
+          "path": "LICENSE",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        }
+      ],
+      "runtime": {
+        "path": "tts-phonon-voices-en"
       }
     }
   ]

@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn compiled_inventory_is_pinned() {
         let inv = Inventory::load().unwrap();
-        assert_eq!(inv.assets.len(), 4);
+        assert_eq!(inv.assets.len(), 5);
         for asset in &inv.assets {
             if asset.format == Format::Files {
                 assert!(asset

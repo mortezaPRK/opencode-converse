@@ -1,9 +1,12 @@
 //! Mirror of the fixed src/protocol.ts contract. Never accept executable/model paths.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 262_144;
+pub const MAX_PARTICIPANTS: usize = 4;
+/// Voices the engine may be asked to speak with: the Phonon default plus the shipped catalog.
+pub const VOICES: [&str; 5] = ["default", "zoey", "maeve", "easton", "preston"];
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Default, Deserialize)]
@@ -23,6 +26,46 @@ pub struct Settings {
     pub acknowledgement: Option<AcknowledgementSetting>,
     #[serde(default)]
     pub echo_cancellation: Option<EchoCancellationSetting>,
+    /// The fixed roster for this conversation. Absent means one agent speaking the default voice.
+    #[serde(default)]
+    pub participants: Option<Vec<Participant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Participant {
+    pub id: String,
+    pub name: String,
+    pub voice: String,
+}
+
+impl Participant {
+    /// The single implicit agent used when the host sends no roster.
+    pub fn implicit() -> Self {
+        Self {
+            id: "a1".into(),
+            name: "Converse".into(),
+            voice: "default".into(),
+        }
+    }
+}
+
+fn valid_participants(list: &[Participant]) -> bool {
+    if list.is_empty() || list.len() > MAX_PARTICIPANTS {
+        return false;
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    list.iter().all(|p| {
+        !p.id.is_empty()
+            && p.id.len() <= 16
+            && p.id.bytes().all(|b| b.is_ascii_alphanumeric())
+            && (2..=16).contains(&p.name.len())
+            && p.name.bytes().all(|b| b.is_ascii_alphabetic())
+            && VOICES.contains(&p.voice.as_str())
+            && ids.insert(p.id.clone())
+            && names.insert(p.name.to_ascii_lowercase())
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -70,15 +113,18 @@ pub enum Host {
     },
     ReplyDelta {
         turn: u64,
+        speaker: String,
         reply: String,
         text: String,
     },
     ReplyEnd {
         turn: u64,
+        speaker: String,
         reply: String,
         text: String,
     },
     Announcement {
+        speaker: String,
         reply: String,
         text: String,
     },
@@ -113,7 +159,7 @@ impl Host {
         match self {
             Self::Init { protocol, settings } => {
                 if *protocol != VERSION {
-                    return Err("Unsupported protocol version; expected 1");
+                    return Err("Unsupported protocol version; expected 2");
                 }
                 for device in [&settings.input_device, &settings.output_device]
                     .into_iter()
@@ -129,9 +175,28 @@ impl Host {
                 if !valid_threads(settings.asr_threads) || !valid_threads(settings.tts_threads) {
                     return Err("Invalid speech thread count");
                 }
+                if settings
+                    .participants
+                    .as_deref()
+                    .is_some_and(|list| !valid_participants(list))
+                {
+                    return Err("Invalid participants");
+                }
             }
-            Self::ReplyDelta { turn, reply, text } | Self::ReplyEnd { turn, reply, text } => {
+            Self::ReplyDelta {
+                turn,
+                speaker,
+                reply,
+                text,
+            }
+            | Self::ReplyEnd {
+                turn,
+                speaker,
+                reply,
+                text,
+            } => {
                 valid_turn(*turn)?;
+                valid_speaker(speaker)?;
                 if reply.is_empty() || reply.len() > 256 || reply.chars().any(char::is_control) {
                     return Err("Invalid reply identifier");
                 }
@@ -140,7 +205,12 @@ impl Host {
                 }
             }
             Self::TurnEnd { turn, .. } | Self::PromptFailed { turn, .. } => valid_turn(*turn)?,
-            Self::Announcement { reply, text } => {
+            Self::Announcement {
+                speaker,
+                reply,
+                text,
+            } => {
+                valid_speaker(speaker)?;
                 if reply.is_empty() || reply.len() > 256 || reply.chars().any(char::is_control) {
                     return Err("Invalid announcement identifier");
                 }
@@ -150,6 +220,17 @@ impl Host {
             }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+fn valid_speaker(speaker: &str) -> Result<(), &'static str> {
+    if speaker.is_empty()
+        || speaker.len() > 16
+        || !speaker.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        Err("Invalid speaker identifier")
+    } else {
         Ok(())
     }
 }
@@ -181,9 +262,16 @@ pub enum Engine {
     },
     Status {
         state: Status,
+        /// Who the state is about: the addressee while thinking, the voice while speaking.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
     },
+    /// `speaker` is the participant the transcript was addressed to (the first agent when the
+    /// user named nobody); `text` has the spoken name removed.
     Prompt {
         turn: u64,
+        speaker: String,
+        addressed: bool,
         text: String,
     },
     /// `played_ms`/`generated_ms` describe the reply being cut off: audio the output
@@ -191,6 +279,9 @@ pub enum Engine {
     /// playback exists (fixtures) so hosts must treat them as optional.
     Interrupt {
         turn: u64,
+        /// The participant that held the floor or was addressed when the user cut in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         played_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,7 +333,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
+            r#"{"type":"init","protocol":2,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
@@ -259,22 +350,22 @@ mod tests {
         assert!(Settings::default().echo_cancellation_enabled());
         for bad in ["\"loud\"", "1", "true"] {
             let value =
-                format!(r#"{{"type":"init","protocol":1,"settings":{{"acknowledgement":{bad}}}}}"#);
+                format!(r#"{{"type":"init","protocol":2,"settings":{{"acknowledgement":{bad}}}}}"#);
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         for bad in ["\"auto\"", "1", "true"] {
             let value = format!(
-                r#"{{"type":"init","protocol":1,"settings":{{"echoCancellation":{bad}}}}}"#
+                r#"{{"type":"init","protocol":2,"settings":{{"echoCancellation":{bad}}}}}"#
             );
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         assert!(serde_json::from_str::<Host>(
-            r#"{"type":"init","protocol":1,"settings":{"endpointing":"fast"}}"#
+            r#"{"type":"init","protocol":2,"settings":{"endpointing":"fast"}}"#
         )
         .is_err());
         for value in [
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":0}}"#,
-            r#"{"type":"init","protocol":1,"settings":{"ttsThreads":257}}"#,
+            r#"{"type":"init","protocol":2,"settings":{"asrThreads":0}}"#,
+            r#"{"type":"init","protocol":2,"settings":{"ttsThreads":257}}"#,
         ] {
             let message: Host = serde_json::from_str(value).unwrap();
             assert!(message.validate().is_err(), "{value}");
@@ -285,6 +376,7 @@ mod tests {
     fn interrupt_progress_is_optional_on_the_wire() {
         let bare = serde_json::to_string(&Engine::Interrupt {
             turn: 1,
+            speaker: None,
             played_ms: None,
             generated_ms: None,
             heard: None,
@@ -293,6 +385,7 @@ mod tests {
         assert_eq!(bare, r#"{"type":"interrupt","turn":1}"#);
         let full = serde_json::to_string(&Engine::Interrupt {
             turn: 1,
+            speaker: Some("a2".into()),
             played_ms: Some(900),
             generated_ms: Some(2400),
             heard: Some("Hi".into()),
@@ -300,7 +393,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             full,
-            r#"{"type":"interrupt","turn":1,"played_ms":900,"generated_ms":2400,"heard":"Hi"}"#
+            r#"{"type":"interrupt","turn":1,"speaker":"a2","played_ms":900,"generated_ms":2400,"heard":"Hi"}"#
         );
     }
 
@@ -308,7 +401,7 @@ mod tests {
     fn strict_contract() {
         for s in [
             r#"{"type":"shutdown","extra":1}"#,
-            r#"{"type":"init","protocol":1,"settings":{"voice":"x"}}"#,
+            r#"{"type":"init","protocol":2,"settings":{"voice":"x"}}"#,
             r#"{"type":"unknown"}"#,
             r#"{"type":"mute","on":1}"#,
             r#"{"type":"pause","on":1}"#,
@@ -316,7 +409,67 @@ mod tests {
             assert!(serde_json::from_str::<Host>(s).is_err(), "{s}");
         }
         let init: Host =
-            serde_json::from_str(r#"{"type":"init","protocol":2,"settings":{}}"#).unwrap();
+            serde_json::from_str(r#"{"type":"init","protocol":1,"settings":{}}"#).unwrap();
         assert!(init.validate().is_err());
+    }
+
+    #[test]
+    fn participants_are_validated_and_speakers_are_required() {
+        let init = |participants: &str| -> Result<(), &'static str> {
+            let message: Host = serde_json::from_str(&format!(
+                r#"{{"type":"init","protocol":2,"settings":{{"participants":{participants}}}}}"#
+            ))
+            .map_err(|_| "parse")?;
+            message.validate()
+        };
+        let p = |id: &str, name: &str, voice: &str| {
+            format!(r#"{{"id":"{id}","name":"{name}","voice":"{voice}"}}"#)
+        };
+        assert!(init(&format!(
+            "[{},{}]",
+            p("a1", "Ada", "zoey"),
+            p("a2", "Grace", "easton")
+        ))
+        .is_ok());
+        for bad in [
+            "[]".to_string(),
+            format!("[{}]", p("a1", "Ada", "unknown")),
+            format!("[{}]", p("a1", "Ada1", "zoey")),
+            format!("[{}]", p("a1", "A", "zoey")),
+            format!(
+                "[{},{}]",
+                p("a1", "Ada", "zoey"),
+                p("a1", "Grace", "easton")
+            ),
+            format!("[{},{}]", p("a1", "Ada", "zoey"), p("a2", "ada", "easton")),
+            format!(
+                "[{}]",
+                ["a1", "a2", "a3", "a4", "a5"]
+                    .iter()
+                    .map(|id| p(
+                        id,
+                        &format!("Name{}", id.replace(char::is_numeric, "")),
+                        "zoey"
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ] {
+            assert!(init(&bad).is_err(), "{bad}");
+        }
+        assert!(
+            serde_json::from_str::<Host>(r#"{"type":"announcement","reply":"x","text":"y"}"#)
+                .is_err()
+        );
+        let ok: Host = serde_json::from_str(
+            r#"{"type":"announcement","speaker":"a1","reply":"x","text":"y"}"#,
+        )
+        .unwrap();
+        assert!(ok.validate().is_ok());
+        let bad: Host = serde_json::from_str(
+            r#"{"type":"announcement","speaker":"a 1","reply":"x","text":"y"}"#,
+        )
+        .unwrap();
+        assert!(bad.validate().is_err());
     }
 }

@@ -46,6 +46,15 @@
       "enum": ["on", "off"],
       "default": "on",
       "description": "on: subtract the engine's own playback from the microphone (WebRTC AEC3) so you can interrupt on speakers; barge-in then needs far less confirmation. off: no echo cancellation and a conservative barge-in guard (about 0.5 s of clear speech); use headphones."
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "description": "Named voice agents for this conversation (1 to 4), fixed when the conversation starts. Each agent has its own voice and its own OpenCode session. Say a name first (\"Ada, check the build\") to address one; with no name the first agent answers. Absent: one agent in the default voice.",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
     }
   },
   "$defs": {
@@ -63,12 +72,55 @@
           "additionalProperties": false,
           "required": ["providerID", "id"],
           "properties": {
-            "providerID": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "id": { "type": "string", "minLength": 1, "maxLength": 512 },
-            "variant": { "type": "string", "minLength": 1, "maxLength": 256 }
+            "providerID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "variant": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
           }
         }
       ]
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z]{2,16}$",
+          "description": "Spoken name; unique (case-insensitive), 2 to 16 ASCII letters. Not a reserved word such as stop, mute, pause, resume, start, attach, detach, user, assistant, everyone, all, or system."
+        },
+        "voice": {
+          "enum": ["zoey", "maeve", "easton", "preston"],
+          "description": "One of the four shipped English voices (zoey: bright US female, maeve: British female, easton: US male, preston: deeper US male). Unique per agent. Omitted: the first unused voice in that order."
+        },
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "OpenCode primary agent this agent's own session runs as. Checked against the server's selectable agents when the conversation starts. Omitted: the hidden Converse supervisor agent. A custom agent keeps its own permissions; the Converse tools and prompt are still added to this session only."
+        },
+        "model": {
+          "$ref": "#/$defs/model",
+          "description": "Model for this agent's session. Omitted: supervisorModel."
+        },
+        "prompt": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Extra instructions for this agent only."
+        }
+      }
     }
   }
 }

@@ -1,3 +1,4 @@
+mod addressing;
 #[cfg(feature = "native-audio")]
 mod audio;
 mod controller;
@@ -182,12 +183,15 @@ struct Backend {
 #[derive(Default)]
 struct FixtureSink {
     fence: generation::Generation,
-    jobs: std::collections::VecDeque<(u64, Arc<AtomicBool>, String)>,
+    jobs: std::collections::VecDeque<(u64, Arc<AtomicBool>, String, String)>,
+    voice: String,
     finish: Option<u64>,
     paused: bool,
     trace: bool,
     #[cfg(test)]
     played: Vec<String>,
+    #[cfg(test)]
+    played_voices: Vec<String>,
 }
 impl FixtureSink {
     fn action(&mut self, action: Action, epoch: u64) -> anyhow::Result<()> {
@@ -196,12 +200,15 @@ impl FixtureSink {
                 self.fence.cancel(epoch);
                 self.jobs.clear();
                 self.finish = None;
+                self.voice.clear();
             }
+            Action::Voice(voice) => self.voice = voice,
             Action::UserActivity(id) => self.fence.acknowledge_user_activity(id),
             Action::Speak(text) => {
                 if self.jobs.len() < MAX_SPEECH_JOBS {
                     if let Some(token) = self.fence.token(epoch) {
-                        self.jobs.push_back((epoch, token, text));
+                        self.jobs
+                            .push_back((epoch, token, text, self.voice.clone()));
                     }
                 }
             }
@@ -209,7 +216,8 @@ impl FixtureSink {
                 if let (Some(token), Some(text)) =
                     (self.fence.token(epoch), controller::ACK_PHRASES.get(index))
                 {
-                    self.jobs.push_back((epoch, token, (*text).to_owned()));
+                    self.jobs
+                        .push_back((epoch, token, (*text).to_owned(), self.voice.clone()));
                 }
             }
             Action::Finish => self.finish = Some(epoch),
@@ -219,21 +227,24 @@ impl FixtureSink {
         Ok(())
     }
     fn tick(&mut self) -> Option<u64> {
-        self.tick_with(|text| {
-            let _ = writeln!(std::io::stderr().lock(), "{}", fixture_trace(text));
+        self.tick_with(|text, voice| {
+            let _ = writeln!(std::io::stderr().lock(), "{}", fixture_trace(text, voice));
         })
     }
-    fn tick_with(&mut self, mut trace: impl FnMut(&str)) -> Option<u64> {
+    fn tick_with(&mut self, mut trace: impl FnMut(&str, &str)) -> Option<u64> {
         if self.paused {
             return None;
         }
-        if let Some((epoch, token, text)) = self.jobs.pop_front() {
+        if let Some((epoch, token, text, voice)) = self.jobs.pop_front() {
             if self.fence.allows(epoch, &token) {
                 if self.trace {
-                    trace(&text);
+                    trace(&text, &voice);
                 }
                 #[cfg(test)]
-                self.played.push(text);
+                {
+                    self.played.push(text);
+                    self.played_voices.push(voice);
+                }
             }
         }
         if self.jobs.is_empty() {
@@ -248,8 +259,13 @@ impl FixtureSink {
     }
 }
 
-fn fixture_trace(text: &str) -> String {
-    serde_json::json!({ "fixture": "played", "text": text }).to_string()
+/// The voice is traced only when it is not the default, so single-agent traces are unchanged.
+fn fixture_trace(text: &str, voice: &str) -> String {
+    if voice.is_empty() || voice == "default" {
+        serde_json::json!({ "fixture": "played", "text": text }).to_string()
+    } else {
+        serde_json::json!({ "fixture": "played", "text": text, "voice": voice }).to_string()
+    }
 }
 impl Backend {
     fn new() -> Self {
@@ -418,7 +434,11 @@ fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
                 initialized = true;
                 out.push(Engine::Status {
                     state: Status::Loading,
+                    speaker: None,
                 });
+                if let Some(participants) = settings.participants.clone() {
+                    controller.set_roster(participants);
+                }
                 if mode == Mode::Fixture {
                     controller.ready(&mut out, &mut actions);
                     controller.hearing(1, &mut out, &mut actions);
@@ -500,11 +520,12 @@ fn doctor() -> i32 {
     let models_ok = match paths::check_models() {
         Ok(models) => {
             eprintln!(
-                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR (Moonshine) directory: {}\n  TTS (Phonon) directory: {}",
+                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR (Moonshine) directory: {}\n  TTS (Phonon) directory: {}\n  Voices directory: {}",
                 models.vad.display(),
                 models.turn.display(),
                 models.asr.dir.display(),
                 models.tts.dir.display(),
+                models.voices.dir.display(),
             );
             true
         }
@@ -609,6 +630,8 @@ mod tests {
     fn oversized_serialized_output_is_rejected_before_any_bytes_are_written() {
         let message = Engine::Prompt {
             turn: 1,
+            speaker: "a1".into(),
+            addressed: false,
             text: "\u{1}".repeat(protocol::MAX_TEXT_BYTES),
         };
         let mut output = vec![];
@@ -616,6 +639,8 @@ mod tests {
         assert!(output.is_empty());
         let message = Engine::Prompt {
             turn: 1,
+            speaker: "a1".into(),
+            addressed: false,
             text: "quotes \\\" ".repeat(10_000),
         };
         write_message(&mut output, &message).unwrap();
@@ -680,11 +705,11 @@ mod tests {
                 .unwrap();
             fixture.action(Action::Finish, 2).unwrap();
             assert_eq!(
-                fixture.tick_with(|text| traces.push(fixture_trace(text))),
+                fixture.tick_with(|text, voice| traces.push(fixture_trace(text, voice))),
                 Some(2)
             );
             assert_eq!(
-                fixture.tick_with(|text| traces.push(fixture_trace(text))),
+                fixture.tick_with(|text, voice| traces.push(fixture_trace(text, voice))),
                 None
             );
             assert_eq!(fixture.played, ["Allowed \"chunk\"."]);
@@ -702,7 +727,7 @@ mod tests {
                 .unwrap();
             fixture.fence.invalidate(1);
             assert!(fixture
-                .tick_with(|text| traces.push(fixture_trace(text)))
+                .tick_with(|text, voice| traces.push(fixture_trace(text, voice)))
                 .is_none());
             assert_eq!(traces.len(), usize::from(enabled));
         }
@@ -773,7 +798,11 @@ mod tests {
             }
         }
         fn announcement(&mut self, id: &str, text: &str) {
+            self.announcement_as("a1", id, text);
+        }
+        fn announcement_as(&mut self, speaker: &str, id: &str, text: &str) {
             self.host(Host::Announcement {
+                speaker: speaker.into(),
                 reply: id.into(),
                 text: text.into(),
             });
@@ -809,6 +838,7 @@ mod tests {
                 .transcript(1, "user request".into(), &mut vec![], &mut vec![]);
             f.host(Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "large".into(),
                 text: "A b c. ".repeat(70),
             });
@@ -816,6 +846,7 @@ mod tests {
             for i in 0..replacements {
                 f.host(Host::ReplyDelta {
                     turn: 1,
+                    speaker: "a1".into(),
                     reply: format!("replacement-{i}"),
                     text: "New answer stays on screen. ".into(),
                 });
@@ -823,11 +854,13 @@ mod tests {
             let reply = format!("replacement-{}", replacements - 1);
             f.host(Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: reply.clone(),
                 text: "More answer stays on screen. ".into(),
             });
             f.host(Host::ReplyEnd {
                 turn: 1,
+                speaker: "a1".into(),
                 reply,
                 text: "New answer stays on screen. More answer stays on screen. ".into(),
             });
@@ -842,7 +875,8 @@ mod tests {
             assert!(matches!(
                 f.out.last(),
                 Some(Engine::Status {
-                    state: Status::Listening
+                    state: Status::Listening,
+                    ..
                 })
             ));
         }
@@ -856,11 +890,13 @@ mod tests {
                 .transcript(1, "user request".into(), &mut vec![], &mut vec![]);
             f.host(Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "large".into(),
                 text: "A b c. ".repeat(70),
             });
             f.host(Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "replacement".into(),
                 text: "New answer stays on screen. ".into(),
             });
@@ -1004,6 +1040,7 @@ mod tests {
             .transcript(1, "fresh user prompt".into(), &mut vec![], &mut vec![]);
         f.host(Host::ReplyEnd {
             turn: 1,
+            speaker: "a1".into(),
             reply: "fresh".into(),
             text: "Fresh response may play.".into(),
         });
@@ -1033,6 +1070,7 @@ mod tests {
                     .transcript(1, "user".into(), &mut vec![], &mut vec![]);
                 let message = Host::ReplyEnd {
                     turn: 1,
+                    speaker: "a1".into(),
                     reply: "large".into(),
                     text,
                 };
@@ -1067,6 +1105,7 @@ mod tests {
         for i in 0..300 {
             f.host(Host::ReplyEnd {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: format!("reply-{i}"),
                 text: "A b c.".into(),
             });
@@ -1085,5 +1124,40 @@ mod tests {
             f.backend.fixture.played.last().unwrap(),
             "Conversation is still running."
         );
+    }
+
+    #[test]
+    fn fixture_plays_each_speaker_in_its_own_voice() {
+        let mut f = SpeechFixture::new();
+        f.controller.set_roster(vec![
+            protocol::Participant {
+                id: "a1".into(),
+                name: "Ada".into(),
+                voice: "zoey".into(),
+            },
+            protocol::Participant {
+                id: "a2".into(),
+                name: "Grace".into(),
+                voice: "default".into(),
+            },
+        ]);
+        f.announcement_as("a1", "x", "Ada announces.");
+        for _ in 0..4 {
+            f.tick();
+        }
+        f.announcement_as("a2", "y", "Grace announces.");
+        for _ in 0..4 {
+            f.tick();
+        }
+        assert_eq!(
+            f.backend.fixture.played,
+            ["Ada announces.", "Grace announces."]
+        );
+        assert_eq!(f.backend.fixture.played_voices, ["zoey", ""]);
+        assert_eq!(
+            fixture_trace("Ada announces.", "zoey"),
+            r#"{"fixture":"played","text":"Ada announces.","voice":"zoey"}"#
+        );
+        assert_eq!(fixture_trace("x", ""), r#"{"fixture":"played","text":"x"}"#);
     }
 }

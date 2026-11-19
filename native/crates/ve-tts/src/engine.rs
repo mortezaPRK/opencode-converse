@@ -2,7 +2,7 @@
 use anyhow::{ensure, Context, Result};
 use ptts::checkpoint::{Checkpoint, ResolveOptions};
 use ptts::preprocess::Lang;
-use ptts::synth::{DeviceKind, Quant, Synth};
+use ptts::synth::{DeviceKind, Quant, SpeechOptions, Synth};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,6 +13,9 @@ pub struct TtsConfig {
     /// Checkpoint directory: `config.json`, `tokenizer.json`, `model.q8.gguf`,
     /// `default-voice.safetensors`. Nothing is ever downloaded.
     pub dir: PathBuf,
+    /// Optional folder of extra `<voice id>.safetensors` embeddings, registered by file stem.
+    /// Local files only; a missing folder registers nothing.
+    pub voices_dir: Option<PathBuf>,
 }
 
 pub struct Tts {
@@ -60,9 +63,17 @@ impl Tts {
             "Phonon default voice is missing from {}",
             config.dir.display()
         );
+        if let Some(dir) = &config.voices_dir {
+            register_voice_dir(&mut synth, dir)?;
+        }
         let sample_rate = synth.sample_rate();
         ensure!(sample_rate > 0, "Phonon returned an invalid sample rate");
         Ok(Self { synth, sample_rate })
+    }
+
+    /// Registered voice names, `default` included.
+    pub fn voices(&self) -> Vec<String> {
+        self.synth.voices()
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -76,6 +87,17 @@ impl Tts {
         &mut self,
         text: &str,
         cancel: &AtomicBool,
+        on_chunk: impl FnMut(&[f32]) -> Result<()>,
+    ) -> Result<Finish> {
+        self.synth_stream_voice(text, None, cancel, on_chunk)
+    }
+
+    /// Like [`Self::synth_stream`] with a per-request voice. `None` is the default voice.
+    pub fn synth_stream_voice(
+        &mut self,
+        text: &str,
+        voice: Option<&str>,
+        cancel: &AtomicBool,
         mut on_chunk: impl FnMut(&[f32]) -> Result<()>,
     ) -> Result<Finish> {
         if text.trim().is_empty() {
@@ -86,7 +108,12 @@ impl Tts {
         }
         let limit = self.sample_rate as usize * MAX_SECONDS;
         let mut produced = 0usize;
-        let stream = self.synth.stream(text)?;
+        let stream = match voice {
+            Some(voice) => self
+                .synth
+                .stream_with(text, &SpeechOptions::default().voice(voice))?,
+            None => self.synth.stream(text)?,
+        };
         for chunk in stream {
             if cancel.load(Ordering::Acquire) {
                 return Ok(Finish::Cancelled);
@@ -115,8 +142,17 @@ impl Tts {
     /// Whole-chunk convenience built on [`Self::synth_stream`]. Cancelled synthesis returns
     /// no audio, so a previously buffered prefix can never be played afterwards.
     pub fn synth(&mut self, text: &str, cancel: &AtomicBool) -> Result<Vec<f32>> {
+        self.synth_voice(text, None, cancel)
+    }
+
+    pub fn synth_voice(
+        &mut self,
+        text: &str,
+        voice: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<f32>> {
         let mut samples = Vec::new();
-        let finish = self.synth_stream(text, cancel, |chunk| {
+        let finish = self.synth_stream_voice(text, voice, cancel, |chunk| {
             samples.extend_from_slice(chunk);
             Ok(())
         })?;
@@ -130,6 +166,27 @@ impl Tts {
     }
 }
 
+fn register_voice_dir(synth: &mut Synth, dir: &std::path::Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("Cannot read voices at {}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
+        .collect();
+    files.sort();
+    for path in files {
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        synth
+            .add_voice_file(name, &path)
+            .with_context(|| format!("Invalid voice embedding {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +194,13 @@ mod tests {
     #[test]
     fn missing_model_directory_names_the_installer() {
         let dir = std::env::temp_dir().join("ve-tts-missing-model-directory");
-        let error = Tts::new(TtsConfig { dir }).err().unwrap().to_string();
+        let error = Tts::new(TtsConfig {
+            dir,
+            voices_dir: None,
+        })
+        .err()
+        .unwrap()
+        .to_string();
         assert!(error.contains("models install"), "{error}");
     }
 
@@ -147,7 +210,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let error = format!(
             "{:#}",
-            Tts::new(TtsConfig { dir: dir.clone() }).err().unwrap()
+            Tts::new(TtsConfig {
+                dir: dir.clone(),
+                voices_dir: None
+            })
+            .err()
+            .unwrap()
         );
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(error.contains("Invalid Phonon model"), "{error}");
