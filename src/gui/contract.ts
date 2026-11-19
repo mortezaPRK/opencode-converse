@@ -18,6 +18,12 @@ export const ConverseDesktop = Ipc.define({
         playedPercent: Schema.optional(Schema.Number),
       }),
     ),
+    transcript: Schema.Array(
+      Schema.Struct({
+        role: Schema.Literals(["user", "assistant"]),
+        text: Schema.String,
+      }),
+    ),
   }),
   methods: {
     start: {
@@ -25,6 +31,9 @@ export const ConverseDesktop = Ipc.define({
         serverID: Schema.String,
         directory: Schema.String,
       }),
+    },
+    attach: {
+      input: Schema.Struct({ sessionID: Schema.String }),
     },
     stop: {},
     mute: {},

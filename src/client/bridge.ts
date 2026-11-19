@@ -27,6 +27,13 @@ export interface Interruption {
   /** Share of generated reply audio that was played, 0-100. */
   playedPercent?: number;
 }
+/** One line of the live conversation, kept by the bridge so surfaces never depend on host caches. */
+export interface TranscriptEntry {
+  role: "user" | "assistant";
+  text: string;
+}
+export const TRANSCRIPT_LIMIT = 50;
+export const TRANSCRIPT_TEXT_BYTES = 2000;
 export interface Snapshot {
   status: VoiceStatus;
   /** Spoken output is paused. The runtime and in-flight work keep running. */
@@ -35,6 +42,8 @@ export interface Snapshot {
   sessionID: string | null;
   /** Latest cut-off reply until the next prompt; null otherwise. */
   interrupted: Interruption | null;
+  /** Latest spoken prompts, supervisor replies and worker updates; bounded. */
+  transcript: TranscriptEntry[];
 }
 export interface BridgeOptions {
   client: OpenCodeClient;
@@ -221,6 +230,16 @@ export function createBridge(options: BridgeOptions) {
     assistants.clear();
   };
   let cutOff: Interruption | null = null;
+  const transcript: TranscriptEntry[] = [];
+  const record = (role: TranscriptEntry["role"], text: string) => {
+    const clipped = clippedUtf8(text, TRANSCRIPT_TEXT_BYTES);
+    const line = clipped.truncated ? `${clipped.text.trimEnd()}…` : clipped.text.trim();
+    if (!line) return;
+    transcript.push({ role, text: line });
+    if (transcript.length > TRANSCRIPT_LIMIT)
+      transcript.splice(0, transcript.length - TRANSCRIPT_LIMIT);
+    changed();
+  };
   let stopping: Promise<void> | undefined;
   let nativeStopFailed = false;
   const snapshot = (): Snapshot => ({
@@ -229,6 +248,7 @@ export function createBridge(options: BridgeOptions) {
     serverID: sessionID ? target.serverID : null,
     sessionID,
     interrupted: cutOff,
+    transcript: transcript.map((entry) => ({ ...entry })),
   });
   const changed = () => options.onChange(snapshot());
   const send = (message: HostMessage) => {
@@ -515,6 +535,7 @@ export function createBridge(options: BridgeOptions) {
           if (text) send({ type: "reply_delta", turn: active.number, reply, text });
         } else {
           // Full text is always sent, including for providers with no deltas.
+          record("assistant", event.data.text);
           send({
             type: "reply_end",
             turn: active.number,
@@ -524,6 +545,7 @@ export function createBridge(options: BridgeOptions) {
         }
       } else if (event.type === "session.text.ended") {
         // Rust alone decides whether to queue, speak, or drop this complete text.
+        record("assistant", event.data.text);
         send({
           type: "announcement",
           reply,
@@ -728,6 +750,7 @@ export function createBridge(options: BridgeOptions) {
         changed();
       }
       newActivity();
+      record("user", message.text);
       let resolveDelivery!: () => void;
       const deliveryDone = new Promise<void>((resolve) => {
         resolveDelivery = resolve;
@@ -838,6 +861,14 @@ export function createBridge(options: BridgeOptions) {
       }
     },
     stop,
+    /** Point the supervisor at an existing session inside this conversation's location. */
+    async attach(targetSessionID: string) {
+      if (closed || !sessionID || !runtimeReady) throw new Error("Converse is not running");
+      await rpc.attach(
+        { supervisorID: sessionID, sessionID: targetSessionID },
+        { ...request, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]) },
+      );
+    },
     mute() {
       if (status !== "muted") newActivity();
       send({ type: "mute", on: status !== "muted" });

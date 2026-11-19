@@ -1,6 +1,5 @@
 /** @jsxImportSource solid-js */
 import { Index, Show, createSignal } from "solid-js";
-import type { SessionMessageInfo } from "@opencode/client";
 import {
   Command,
   ComposerPill,
@@ -26,62 +25,8 @@ import {
 const pillTone = (tone: PresenceTone): ComposerPillTone | undefined =>
   tone === "success" || tone === "warning" || tone === "danger" ? tone : undefined;
 
-const TRANSCRIPT_LIMIT = 80;
-const TRANSCRIPT_TEXT_LIMIT = 4_000;
-
-interface TranscriptEntry {
-  readonly role: string;
-  readonly text: string;
-  /** Set on the reply the user cut off; display only. */
-  readonly interrupted?: { readonly heard?: string; readonly playedPercent?: number };
-}
-
-/** The live transcript is read-only prose; reasoning, tool payloads and system messages stay out. */
-function transcriptEntry(message: SessionMessageInfo): TranscriptEntry | undefined {
-  let role: string;
-  let text: string;
-  switch (message.type) {
-    case "user":
-      role = "You";
-      text = message.text;
-      break;
-    case "assistant":
-      role = "Supervisor";
-      text = message.content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join(" ");
-      break;
-    case "synthetic":
-      role = "Worker update";
-      text = message.text;
-      break;
-    default:
-      return;
-  }
-  if (!text.trim()) return;
-  return {
-    role,
-    text:
-      text.length > TRANSCRIPT_TEXT_LIMIT ? `${text.slice(0, TRANSCRIPT_TEXT_LIMIT - 1)}…` : text,
-  };
-}
-
-function transcriptEntries(
-  messages: readonly SessionMessageInfo[],
-  interrupted?: TranscriptEntry["interrupted"] | null,
-): TranscriptEntry[] {
-  const entries: TranscriptEntry[] = [];
-  for (const message of messages) {
-    const entry = transcriptEntry(message);
-    if (entry) entries.push(entry);
-  }
-  // The engine reports a cut-off before the next prompt, so it applies to the latest reply.
-  const last = entries.length - 1;
-  if (interrupted && last >= 0 && entries[last]!.role === "Supervisor")
-    entries[last] = { ...entries[last]!, interrupted };
-  return entries.slice(-TRANSCRIPT_LIMIT);
-}
+/** Role labels for the bridge-owned transcript; it is read-only prose. */
+const ROLE_LABEL = { user: "You", assistant: "Supervisor" } as const;
 
 export default Plugin.define({
   main,
@@ -131,30 +76,35 @@ export default Plugin.define({
         { signal: ctx.signal },
       );
     };
+    // Start from the viewed session when idle; never retarget a running conversation.
+    const attachCurrent = async () => {
+      const session = ctx.sessions.current();
+      if (!session) throw new Error("Open the session you want to talk to first");
+      const live = audio.state();
+      if (live?.sessionID) {
+        if (live.sessionID === session.id)
+          throw new Error("This is the Converse supervisor session");
+        if (live.serverID !== session.server.id)
+          throw new Error("Stop Converse and start it from a session on this server");
+      } else await start();
+      await audio.attach({ sessionID: session.id }, { signal: ctx.signal });
+    };
     const open = () => {
       const state = audio.state();
       if (state?.serverID && state.sessionID)
         ctx.tabs.open({ server: state.serverID, id: state.sessionID }, { focus: true });
     };
-    const messages = () => {
-      const live = audio.state();
-      if (!live?.serverID || !live.sessionID) return [];
-      return ctx.servers.get(live.serverID)?.data.session.message.list(live.sessionID) ?? [];
-    };
-    const entries = () => transcriptEntries(messages(), audio.state()?.interrupted);
+    // The transcript is owned by the main-process bridge and arrives with the state,
+    // so it never depends on the host's per-session message cache.
+    const entries = () => audio.state()?.transcript ?? [];
     const paused = () => audio.state()?.paused === true;
     const muted = () => audio.state()?.status === "muted";
     const supervisor = () => {
       const live = audio.state();
-      if (!live?.serverID || !live.sessionID) return "No supervisor session.";
-      const server = ctx.servers.get(live.serverID);
-      if (!server) return "Supervisor session is unavailable.";
+      if (!live?.sessionID) return "No supervisor session.";
       const last = entries().at(-1);
-      if (server.data.session.status(live.sessionID) === "running")
-        return last?.role === "Supervisor" ? "Supervisor is replying." : "Supervisor is working.";
-      return last
-        ? "Supervisor is idle. The latest update is in the transcript."
-        : "Supervisor is idle. Say what you need.";
+      if (!last) return "Supervisor is idle. Say what you need.";
+      return "The latest exchange is in the transcript.";
     };
     const DETAILS_PANEL = "details";
     const detailsKey = () => `${ctx.id}:${DETAILS_PANEL}`;
@@ -162,17 +112,6 @@ export default Plugin.define({
     // screens the same view opens in the host's drawer.
     const Details = (props: { session: SessionRef }) => {
       const drawer = useDrawer();
-      // Seed the host's reactive message store once; later deltas and worker
-      // updates arrive through the same store while the panel stays open.
-      const state = audio.state();
-      if (state?.serverID && state.sessionID) {
-        const server = ctx.servers.get(state.serverID);
-        const sessionID = state.sessionID;
-        if (server)
-          void Promise.resolve()
-            .then(() => server.data.session.message.sync(sessionID))
-            .catch(() => {});
-      }
       const close = () => {
         drawer?.close();
         ctx.layout.close(detailsKey(), props.session);
@@ -227,25 +166,25 @@ export default Plugin.define({
                           "text-transform": "uppercase",
                         }}
                       >
-                        {entry().role}
+                        {ROLE_LABEL[entry().role]}
                       </div>
                       <div style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>
                         {entry().text}
                       </div>
-                      <Show when={entry().interrupted}>
-                        {(cut) => (
-                          <div style={{ opacity: 0.7, "font-size": "12px" }}>
-                            Interrupted
-                            {cut().playedPercent === undefined
-                              ? ""
-                              : ` after ${cut().playedPercent}% of the spoken reply`}
-                            {cut().heard ? `. Heard: “${cut().heard}”` : ""}
-                          </div>
-                        )}
-                      </Show>
                     </div>
                   )}
                 </Index>
+                <Show when={audio.state()?.interrupted}>
+                  {(cut) => (
+                    <div style={{ opacity: 0.7, "font-size": "12px" }}>
+                      Interrupted
+                      {cut().playedPercent === undefined
+                        ? ""
+                        : ` after ${cut().playedPercent}% of the spoken reply`}
+                      {cut().heard ? `. Heard: “${cut().heard}”` : ""}
+                    </div>
+                  )}
+                </Show>
               </div>
             </Show>
           </div>
@@ -385,6 +324,7 @@ export default Plugin.define({
         title: "pause/resume spoken output",
         run: () => attempt(() => audio.pause({ paused: audio.state()?.paused !== true })),
       },
+      { id: "attach", title: "talk to this session", run: () => attempt(attachCurrent) },
       { id: "open", title: "open supervisor session", run: open },
       { id: "details", title: "show conversation details", run: openDetails },
     ];

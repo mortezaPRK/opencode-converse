@@ -82,7 +82,9 @@ or the object form:
 ```
 
 The supervisor session is created with the hidden `converse` agent. Every worker
-session is created with the hidden `converse-worker` agent. Both agents are
+session is created with the hidden `converse-worker` agent unless the user asks
+for another visible primary agent (for example `plan`), validated against the
+server's agent list. Both agents are
 hidden from the normal agent picker and lists. Workers keep normal OpenCode
 permission behavior: the user approves or rejects requests on screen.
 

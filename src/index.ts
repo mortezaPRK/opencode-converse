@@ -92,6 +92,7 @@ export default Plugin.define({
           hello: async () => ({ protocol: 1 as const, packageRoot: PACKAGE_ROOT }),
           start: async () => supervisor.start(),
           stop: async (input) => supervisor.stop(input.sessionID),
+          attach: async (input) => supervisor.attachForUser(input.supervisorID, input.sessionID),
         }),
       );
     } catch (error) {
