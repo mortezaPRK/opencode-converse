@@ -27,17 +27,27 @@ test("every speech asset has a bounded size and pinned SHA-256", async () => {
   const ids = new Set(manifest.assets.map((asset) => asset.id));
   for (const role of ["vad", "turn", "asr", "tts"]) assert.ok(ids.has(manifest.roles[role]));
   for (const asset of manifest.assets) {
-    assert.match(asset.sha256, /^[a-f0-9]{64}$/);
-    assert.equal(new URL(asset.url).protocol, "https:");
-    assert.ok(Number.isSafeInteger(asset.bytes) && asset.bytes > 0 && asset.bytes < 200_000_000);
-    assert.ok(!asset.file.includes("/") && !asset.file.includes("\\"));
-    assert.ok(["file", "tar.bz2"].includes(asset.format));
+    assert.ok(["file", "tar.bz2", "files"].includes(asset.format));
     assert.ok(asset.runtime.path && !asset.runtime.path.startsWith("/"));
+    const pins =
+      asset.format === "files"
+        ? asset.files.map((member) => ({ ...member, file: member.path }))
+        : [asset];
+    assert.ok(pins.length > 0);
+    if (asset.format === "files") {
+      assert.ok(!asset.runtime.path.includes("/") && !asset.url && !asset.sha256);
+    }
+    for (const pin of pins) {
+      assert.match(pin.sha256, /^[a-f0-9]{64}$/);
+      assert.equal(new URL(pin.url).protocol, "https:");
+      assert.ok(Number.isSafeInteger(pin.bytes) && pin.bytes > 0 && pin.bytes < 200_000_000);
+      assert.ok(!pin.file.includes("/") && !pin.file.includes("\\"));
+      if (pin.url.includes("huggingface.co")) assert.match(pin.url, /\/resolve\/[a-f0-9]{40}\//);
+    }
     if (asset.format === "tar.bz2") {
       assert.ok(asset.install?.root);
       assert.ok(asset.runtime.tokens?.startsWith(`tts/${asset.install.root}/`));
       assert.ok(asset.runtime.dataDir?.startsWith(`tts/${asset.install.root}/`));
     }
-    if (asset.url.includes("huggingface.co")) assert.match(asset.url, /\/resolve\/[a-f0-9]{40}\//);
   }
 });

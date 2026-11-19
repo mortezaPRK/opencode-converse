@@ -23,3 +23,7 @@ ve-asr = { path = "../crates/ve-asr", optional = true }
 ve-vad = { path = "../crates/ve-vad", optional = true }
 ve-turn = { path = "../crates/ve-turn", optional = true }
 ve-tts = { path = "../crates/ve-tts", optional = true }
+
+[[example]]
+name = "speech_quality"
+required-features = ["native-audio"]

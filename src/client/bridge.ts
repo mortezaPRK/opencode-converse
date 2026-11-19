@@ -20,10 +20,21 @@ export interface Target {
   readonly serverID: string;
   readonly directory: string;
 }
+/** What was heard of a reply the user cut off. Display only; the agent never sees it. */
+export interface Interruption {
+  /** Spoken text heard before the cut-off. */
+  heard?: string;
+  /** Share of generated reply audio that was played, 0-100. */
+  playedPercent?: number;
+}
 export interface Snapshot {
   status: VoiceStatus;
+  /** Spoken output is paused. The runtime and in-flight work keep running. */
+  paused: boolean;
   serverID: string | null;
   sessionID: string | null;
+  /** Latest cut-off reply until the next prompt; null otherwise. */
+  interrupted: Interruption | null;
 }
 export interface BridgeOptions {
   client: OpenCodeClient;
@@ -173,8 +184,10 @@ export function createBridge(options: BridgeOptions) {
   });
   void streamReady.catch(() => {});
   let runtime: Runtime | undefined;
+  let runtimeReady = false;
   let sessionID: string | null = null;
   let status: VoiceStatus = "off";
+  let paused = false;
   let closed = false;
   let started = false;
   let active: Turn | undefined;
@@ -207,12 +220,15 @@ export function createBridge(options: BridgeOptions) {
     for (const id of assistants.keys()) remember(retiredAssistants, id);
     assistants.clear();
   };
+  let cutOff: Interruption | null = null;
   let stopping: Promise<void> | undefined;
   let nativeStopFailed = false;
   const snapshot = (): Snapshot => ({
     status,
+    paused,
     serverID: sessionID ? target.serverID : null,
     sessionID,
+    interrupted: cutOff,
   });
   const changed = () => options.onChange(snapshot());
   const send = (message: HostMessage) => {
@@ -268,6 +284,8 @@ export function createBridge(options: BridgeOptions) {
           rejectStream(stopped);
           abort.abort(stopped);
           status = "off";
+          paused = false;
+          runtimeReady = false;
           changed();
         }
       }
@@ -705,6 +723,10 @@ export function createBridge(options: BridgeOptions) {
         return;
       }
       lastTurn = message.turn;
+      if (cutOff) {
+        cutOff = null;
+        changed();
+      }
       newActivity();
       let resolveDelivery!: () => void;
       const deliveryDone = new Promise<void>((resolve) => {
@@ -728,6 +750,13 @@ export function createBridge(options: BridgeOptions) {
     if (message.type === "interrupt" && active?.number === message.turn && sessionID) {
       const interrupted = active;
       interrupted.cancelled = true;
+      cutOff = {
+        ...(message.heard === undefined ? {} : { heard: message.heard }),
+        ...(message.played_ms === undefined || !message.generated_ms
+          ? {}
+          : { playedPercent: Math.round((message.played_ms / message.generated_ms) * 100) }),
+      };
+      changed();
       queueNextPrompt = true;
       newActivity();
       finish("interrupted");
@@ -800,6 +829,8 @@ export function createBridge(options: BridgeOptions) {
           if (closed && isStoppedError(abort.signal.reason)) throw abort.signal.reason;
           throw error;
         }
+        runtimeReady = true;
+        if (paused) send({ type: "pause", on: true });
       } catch (error) {
         fail(error);
         await stop().catch(() => {});
@@ -810,6 +841,12 @@ export function createBridge(options: BridgeOptions) {
     mute() {
       if (status !== "muted") newActivity();
       send({ type: "mute", on: status !== "muted" });
+    },
+    pause(on: boolean) {
+      if (closed || paused === on) return;
+      paused = on;
+      if (runtimeReady) send({ type: "pause", on });
+      changed();
     },
   };
 }

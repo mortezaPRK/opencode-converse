@@ -20,22 +20,47 @@ C/C++, and libclang. Linux additionally needs ALSA development headers and
 pkg-config. macOS uses Whisper Metal; other targets use CPU Whisper. macOS has
 a minimum deployment target of 13.4 for the downloaded ONNX Runtime archive.
 
+## Offline speech listening comparison
+
+With the pinned models already installed, generate WAV samples without opening
+microphone or playback devices:
+
+```sh
+cargo run --manifest-path native/Cargo.toml --locked -p opencode-converse --features native-audio --example speech_quality -- /absolute/path/to/new-listening-directory
+```
+
+The output directory must not already exist. Samples compare production
+phrase-aware chunking, whole-input synthesis, and deliberately forced 24-word
+cuts (a diagnostic control, not an exact historical baseline). Start with sample
+02 for mid-sentence seams and sample 04 for clause pacing. Phonon sampling is
+stochastic, so listen to multiple examples rather than interpreting a single
+waveform difference as proof. Each line prints time to first audible sample
+(TTFA, through the production streaming joiner) and the real-time factor
+(synthesis time / audio time; lower is faster); a final line times how quickly
+cancellation returns. These measure offline synthesis on this machine, not
+playback-device latency. Use `--release`; debug builds are far slower.
+
+The production chunker keeps sentence context up to 320 UTF-8 bytes or 40 words,
+then prefers clause punctuation before falling back to a bounded word/token cut.
+Common English titles and uppercase initials/acronyms do not force sentence
+breaks. Ambiguous acronym-final sentences may stay together until another clear
+boundary or finalization. This larger context can delay the first chunk of a
+long, unpunctuated streamed reply; model and playback queue limits remain intact.
+
 ## Native linking constraints
 
-- `sherpa-rs-sys 0.6.8` downloads its exact sherpa-onnx distribution, including
-  shared libraries. These libraries must stay beside the executable when it is
-  installed; copying only the executable is not a complete native installation.
-- The build helper prepares `target/<profile>/deps` because this dependency's
-  library-copy code assumes it exists, which is not true with Cargo 1.100's
-  artifact layout. Direct Cargo builds need equivalent directory preparation.
-  It resolves the artifact root through Cargo metadata (including `target-dir`
-  configuration) and also prepares `<target>/<triple>/<profile>/deps` when
-  `CARGO_BUILD_TARGET` is set. For target-specific helper builds, set that variable
-  explicitly, including when Cargo config already sets `build.target`.
-- The final executable adds a relative library rpath on macOS and Linux.
+- Text-to-speech uses the pure-Rust `ptts` crate (Gradium Phonon 31M, CPU, q8
+  weights) with only its `hf` tokenizer feature. It reads a local model folder and
+  never downloads; the `hub` feature must stay disabled. No shared libraries are
+  required beside the executable, so the engine is one file.
+- The build helper prepares `target/<profile>/deps` (and
+  `<target>/<triple>/<profile>/deps` when `CARGO_BUILD_TARGET` is set), resolving
+  the artifact root through Cargo metadata, including `target-dir` configuration.
+  For target-specific helper builds, set that variable explicitly, including when
+  Cargo config already sets `build.target`.
 - The ONNX model crates explicitly use ORT API 17. Changing API/optimization
   behavior can alter Smart Turn decisions. They statically link their ORT
-  archive, while sherpa uses the shared runtime supplied by its distribution.
+  archive.
 - The macOS static ORT archive's CoreML objects require Apple's compiler-rt
   builtins. The model crates locate this through the selected compiler's
   resource directory, not a hardcoded Xcode installation path.
@@ -55,7 +80,9 @@ the absolute `OPENCODE_CONVERSE_DEV_DATA_DIR` local-development override.
 
 `models install` is explicit network access. It uses the compiled
 `assets/models.json`, exact byte counts and SHA-256, per-asset OS locks, bounded
-regular-file/directory-only archive extraction, and atomic per-asset commit.
+regular-file/directory-only archive extraction, and atomic per-asset commit. The
+Phonon TTS asset pins every member file (URL, SHA-256, bytes) at one Hugging Face
+commit and publishes the complete directory atomically without overwriting.
 It does not replace differing existing models without user action. The verified
 downloads are retained in the local `downloads` directory for repeat installs.
 Startup never downloads models. `doctor` checks presence only, never opens a

@@ -64,9 +64,11 @@ The source setup uses these components, among others:
   above match `Cargo.lock`; they identify the reviewed source artifacts, not
   clearance of every resulting native binary or bundled component.
 - ONNX Runtime: MIT.
-- sherpa-rs / sherpa-onnx: see their upstream license and bundled notices.
-- eSpeak NG code and data included by sherpa: GPL-family licensing; do not infer
-  permissive licensing from sherpa's top-level license.
+- **ptts 0.7.1** (Gradium Phonon runtime, `github.com/gradium-ai/xn-ptts`):
+  **MIT OR Apache-2.0** per its crates.io manifest. Built with only the `hf`
+  (tokenizer) feature; the `hub` network-download feature is never enabled. Its
+  resolved dependencies (for example `xn`, `tokenizers`, `safetensors`) are
+  inspected from Cargo.lock like any other crate.
 - Rust dependencies: inspect each crate's license in Cargo.lock's resolved source.
 
 Models are downloaded separately, never included in the npm source package:
@@ -74,9 +76,15 @@ Models are downloaded separately, never included in the npm source package:
 - Silero VAD: upstream MIT notices.
 - Smart Turn v3: upstream BSD-2-Clause notices.
 - Whisper: upstream MIT notices.
-- Piper Lessac: inspect its model card and dataset/voice terms.
+- Phonon 31M English (`gradium/phonon-31m-en`, pinned commit in
+  `assets/models.json`): weights, tokenizer, and the default voice are
+  **Apache-2.0** per the model card and the `LICENSE` file installed with them.
+  The model builds on Pocket TTS and the Mimi codec from Kyutai: retain Kyutai
+  attribution and verify the upstream terms of those components for the exact
+  artifact. Phonon 40M checkpoints are CC BY-NC 4.0 and are not used.
 
 Before distributing native prebuilts or models, collect the corresponding
 copyright/license notices and review redistribution obligations, especially
-those of eSpeak NG. This change provides explicit source builds, not prebuilt
-native redistribution, and does not claim all dependencies are MIT.
+the exact shipped artifacts. This change provides explicit source builds, not prebuilt
+native redistribution, and does not claim all dependencies are MIT. There is no
+blanket clearance; exact-artifact review remains required.

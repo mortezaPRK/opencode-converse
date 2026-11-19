@@ -1730,6 +1730,8 @@ test("server options validate models, runtime paths, and reject unknown fields",
     { asrThreads: 0 },
     { ttsThreads: 257 },
     { useGpu: "yes" },
+    { endpointing: "fast" },
+    { endpointing: 1 },
   ]) {
     assert.throws(() => parseOptions(value));
   }
@@ -1747,6 +1749,7 @@ test("server options validate models, runtime paths, and reject unknown fields",
       runtime: { asrThreads: 2, ttsThreads: 3, useGpu: false },
     },
   );
+  assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, { endpointing: "patient" });
   assert.deepEqual(parseOptions({ $schema: "ignored" }), { runtime: {} });
   assert.deepEqual(parseOptions({}), { runtime: {} });
 });

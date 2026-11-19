@@ -9,6 +9,7 @@ pub enum Action {
     Speak(String),
     Finish,
     Mute(bool),
+    Pause(bool),
 }
 
 struct Reply {
@@ -35,6 +36,7 @@ pub struct Controller {
     status: Status,
     speech_chunks: usize,
     speech_clipped: bool,
+    paused: bool,
 }
 
 impl Default for Controller {
@@ -54,6 +56,7 @@ impl Default for Controller {
             status: Status::Loading,
             speech_chunks: 0,
             speech_clipped: false,
+            paused: false,
         }
     }
 }
@@ -119,7 +122,13 @@ impl Controller {
         self.announcing = false;
     }
     fn schedule_announcement(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
-        if !self.ready || self.muted || self.active || self.hearing.is_some() || self.playing {
+        if !self.ready
+            || self.muted
+            || self.paused
+            || self.active
+            || self.hearing.is_some()
+            || self.playing
+        {
             return;
         }
         while let Some((_id, text)) = self.announcements.pop_front() {
@@ -152,7 +161,12 @@ impl Controller {
         }
         self.invalidate_announcements();
         if self.active {
-            out.push(Engine::Interrupt { turn: self.turn });
+            out.push(Engine::Interrupt {
+                turn: self.turn,
+                played_ms: None,
+                generated_ms: None,
+                heard: None,
+            });
         }
         self.cancel(actions);
         actions.push(Action::UserActivity(id));
@@ -219,7 +233,12 @@ impl Controller {
                 if on {
                     self.invalidate_announcements();
                     if self.active {
-                        out.push(Engine::Interrupt { turn: self.turn });
+                        out.push(Engine::Interrupt {
+                            turn: self.turn,
+                            played_ms: None,
+                            generated_ms: None,
+                            heard: None,
+                        });
                     }
                     self.active = false;
                     self.cancel(actions);
@@ -227,6 +246,17 @@ impl Controller {
                 actions.push(Action::Mute(on));
                 if self.ready {
                     self.rest(out);
+                }
+            }
+            Host::Pause { on } => {
+                if self.paused == on {
+                    return Ok(());
+                }
+                self.paused = on;
+                actions.push(Action::Pause(on));
+                if !on {
+                    // Announcements held while paused may speak once output resumes.
+                    self.schedule_announcement(out, actions);
                 }
             }
             Host::ReplyDelta { turn, reply, text } => {
@@ -614,6 +644,105 @@ mod tests {
         c.transcript(2, "new prompt".into(), &mut out, &mut a);
         assert!(reply(&mut c, "old turn", true).is_empty());
     }
+    #[test]
+    fn pause_keeps_the_turn_and_its_speech_for_resume() {
+        let mut c = active();
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::ReplyEnd {
+                turn: 1,
+                reply: "r".into(),
+                text: "A spoken reply.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert_eq!(a, [Action::Speak("A spoken reply.".into())]);
+        assert_eq!(c.status, Status::Speaking);
+
+        out.clear();
+        a.clear();
+        c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
+        assert_eq!(a, [Action::Pause(true)]);
+        assert!(out.is_empty(), "pausing is not a voice-state change");
+        assert!(c.active && c.playing, "pause must not cancel the turn");
+
+        // Speech completed while paused waits for resume instead of being dropped.
+        out.clear();
+        a.clear();
+        c.host(
+            Host::TurnEnd {
+                turn: 1,
+                reason: Reason::Completed,
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert_eq!(a, [Action::Finish]);
+        assert!(!c.active);
+
+        a.clear();
+        c.host(Host::Pause { on: false }, &mut out, &mut a).unwrap();
+        assert_eq!(a, [Action::Pause(false)]);
+    }
+
+    #[test]
+    fn barge_in_while_paused_discards_held_speech() {
+        let mut c = active();
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::ReplyEnd {
+                turn: 1,
+                reply: "r".into(),
+                text: "Held speech.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
+        out.clear();
+        a.clear();
+        c.hearing(2, &mut out, &mut a);
+        assert!(a.contains(&Action::Cancel), "held speech is discarded");
+        assert!(matches!(
+            out.first(),
+            Some(Engine::Interrupt { turn: 1, .. })
+        ));
+        assert!(!c.active);
+    }
+    #[test]
+    fn paused_announcements_wait_for_resume() {
+        let mut c = Controller::default();
+        let mut out = vec![];
+        let mut a = vec![];
+        c.ready(&mut out, &mut a);
+        out.clear();
+        c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
+        assert_eq!(a, [Action::Pause(true)]);
+        assert!(out.is_empty());
+        a.clear();
+        c.host(
+            Host::Announcement {
+                reply: "a".into(),
+                text: "A worker update.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert!(a.is_empty(), "a paused announcement must not queue audio");
+
+        c.host(Host::Pause { on: false }, &mut out, &mut a).unwrap();
+        assert!(a.contains(&Action::Pause(false)));
+        assert!(a.iter().any(|action| matches!(action, Action::Speak(_))));
+        assert!(a.contains(&Action::Finish));
+    }
+
     #[test]
     fn mute_invalidates_capture_and_reply() {
         let mut c = active();

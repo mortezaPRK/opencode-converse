@@ -1,11 +1,26 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
-import { ComposerPill, TitlebarItem } from "@opencode/plugin/gui";
-import gui from "../dist/gui.js";
-import { createMain } from "../dist/gui/main.js";
+import { Command, ComposerPill, Panel, TitlebarItem } from "@opencode/plugin/gui";
 import { createBridge } from "../dist/client/bridge.js";
 import { PRESENCE_ERROR_MS } from "../dist/presence.js";
 import { cleanupFixture } from "./client-cleanup-fixture.mjs";
+
+// TypeScript emits the standard Solid JSX runtime import for the Dialog view.
+// Node resolves that subpath to Solid's server build, while the Electron host
+// supplies the DOM runtime. Tests never render; this only lets them load it.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    return nextResolve(
+      specifier === "solid-js/jsx-runtime"
+        ? new URL("../dist/gui/jsx-runtime.js", import.meta.url).href
+        : specifier,
+      context,
+    );
+  },
+});
+const gui = (await import("../dist/gui.js")).default;
+const { createMain } = await import("../dist/gui/main.js");
 
 function setup({ stop, start, fixture, options } = {}) {
   let implementation;
@@ -81,11 +96,18 @@ function setup({ stop, start, fixture, options } = {}) {
         bridges.push(current);
         return current;
       }
-      const state = { status: "off", serverID: options.target.serverID, sessionID: "supervisor" };
+      const state = {
+        status: "off",
+        paused: false,
+        serverID: options.target.serverID,
+        sessionID: "supervisor",
+        interrupted: null,
+      };
       const bridge = {
         options,
         stopped: 0,
         muted: 0,
+        paused: [],
         snapshot: () => ({ ...state }),
         async start() {
           await start?.(bridge);
@@ -95,11 +117,17 @@ function setup({ stop, start, fixture, options } = {}) {
         async stop() {
           bridge.stopped++;
           state.status = "off";
+          state.paused = false;
           options.onChange({ ...state });
           await stop?.(bridge);
         },
         mute() {
           bridge.muted++;
+        },
+        pause(paused) {
+          bridge.paused.push(paused);
+          state.paused = paused;
+          options.onChange({ ...state });
         },
       };
       bridges.push(bridge);
@@ -148,8 +176,10 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
   assert.equal(s.bridges[0].options.packageRoot, "/local/package");
   assert.deepEqual(s.api.state(2), {
     status: "listening",
+    paused: false,
     serverID: "remote",
     sessionID: "supervisor",
+    interrupted: null,
   });
   await s.api.stop(undefined, s.caller(1));
   await s.api.start({ serverID: "sidecar", directory: "/local" }, s.caller(2));
@@ -316,6 +346,12 @@ test("GUI owns one run across windows, owner closes cleanup, stale callbacks ign
   assert.equal(s.bridges.length, 1);
   await s.api.mute(undefined, s.caller(1));
   assert.equal(s.bridges[0].muted, 1);
+  await assert.rejects(s.api.pause({ paused: true }, s.caller(2)), /another window/);
+  await s.api.pause({ paused: true }, s.caller(1));
+  assert.deepEqual(s.bridges[0].paused, [true]);
+  assert.equal(s.api.state(1).paused, true);
+  await s.api.pause({ paused: false }, s.caller(1));
+  assert.deepEqual(s.bridges[0].paused, [true, false]);
   s.close(2);
   assert.equal(s.bridges[0].stopped, 0);
   s.close(1);
@@ -460,26 +496,45 @@ test("GUI disposal ignores intentional startup cancellation and queued pre-start
 // The window setup only renders through the host, so the test records what it
 // contributes and asks the same reactive thunks the host would read.
 function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
-  const state = { status, sessionID };
+  const state = { status, paused: false, sessionID };
   let titlebar;
   let pill;
   let listener;
+  let panel;
+  const pauses = [];
+  const panels = [];
+  const commands = new Map();
+  const session = { id: "supervisor", server: { id: "remote" } };
   const ctx = {
+    id: "converse",
     signal: new AbortController().signal,
     app: { platform: "desktop" },
     toast: { show: () => {} },
-    sessions: { current: () => undefined },
+    sessions: { current: () => session, list: () => [session] },
     screen: { current: () => undefined },
     tabs: { open: () => true },
+    layout: {
+      open: (...args) => panels.push(args),
+      close: () => {},
+    },
     add(registry, value) {
       if (registry === TitlebarItem) titlebar = value;
       else if (registry === ComposerPill) pill = value;
+      else if (registry === Panel) panel = value;
+      else if (registry === Command) {
+        const item = typeof value === "function" ? value() : value;
+        commands.set(item.id, item);
+      }
     },
     main: () => ({
       state: () => ({ ...state }),
       start: async () => {},
       stop: async () => {},
       mute: async () => {},
+      pause: async (input) => {
+        pauses.push(input.paused);
+        state.paused = input.paused;
+      },
       on: (name, handler) => {
         listener = handler;
         return () => {
@@ -491,6 +546,10 @@ function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
   const cleanup = gui.setup(ctx);
   return {
     state,
+    pauses,
+    panels,
+    panel,
+    command: (id) => commands.get(id),
     item: () => (typeof titlebar === "function" ? titlebar() : titlebar),
     pill,
     shown: (id = "supervisor") => pill.show({ session: { id } }),
@@ -530,7 +589,7 @@ test("GUI status pill names the state and picks artwork for it", () => {
   s.cleanup();
 });
 
-test("GUI composer chip stays on the supervisor session and offers its actions", () => {
+test("GUI composer chip stays on the supervisor session and opens a quick popover", () => {
   const s = statusSetup();
   assert.equal(s.shown(), undefined, "idle shows no chip");
 
@@ -539,16 +598,14 @@ test("GUI composer chip stays on the supervisor session and offers its actions",
   assert.equal(view.label, "Converse · Listening");
   assert.equal(view.icon, "outline-wave-audio");
   assert.equal(view.tone, "success");
-  assert.match(view.title, /Mic open/);
-  assert.deepEqual(
-    view.rows.map((row) => row.id),
-    ["mute", "open", "stop"],
-  );
-  assert.equal(view.rows[2].tone, "danger");
+  assert.match(view.title, /quick controls/);
+  assert.equal(view.rows, undefined, "the pill never expands actions inline");
+  assert.equal(view.run, undefined);
+  assert.equal(typeof view.menu, "function", "the pill opens a compact popover");
   assert.equal(s.shown("worker"), undefined, "other sessions never show it");
 
   s.state.status = "muted";
-  assert.equal(s.shown().rows[0].label, "Unmute microphone");
+  assert.equal(s.shown().label, "Converse · Muted");
   assert.equal(s.shown().tone, "warning");
 
   s.state.sessionID = null;
@@ -556,7 +613,30 @@ test("GUI composer chip stays on the supervisor session and offers its actions",
   s.cleanup();
 });
 
-test("GUI errors outlive the idle status and can be dismissed or expire", () => {
+test("GUI active status opens details and pause/resume keeps the conversation alive", () => {
+  const s = statusSetup({ status: "speaking" });
+  assert.equal(s.panel.region, "side");
+  assert.deepEqual(s.panel.list({ open: [] }), []);
+  assert.deepEqual(s.panel.list({ open: ["details"] }), [{ id: "details", title: "Converse" }]);
+  assert.equal(s.panel.mobile.kind, "drawer");
+  s.item().run();
+  assert.equal(s.panels.length, 1, "the sidebar status opens the live detail panel");
+  assert.equal(s.item().pressed, true);
+
+  const pause = s.command("pause");
+  pause.run();
+  assert.deepEqual(s.pauses, [true]);
+  assert.equal(s.item().label, "Converse: Paused");
+  assert.match(s.item().title, /keeps running/);
+
+  pause.run();
+  assert.deepEqual(s.pauses, [true, false]);
+  assert.equal(s.item().label, "Converse: Speaking");
+  assert.equal(s.panels.length, 1, "pause and resume never replace the panel");
+  s.cleanup();
+});
+
+test("GUI errors outlive the idle status, open the sidebar panel and can expire", () => {
   const s = statusSetup({ status: "thinking" });
   s.fail("engine crashed");
   const failed = s.item();
@@ -565,11 +645,11 @@ test("GUI errors outlive the idle status and can be dismissed or expire", () => 
   assert.equal(failed.pressed, true, "the running conversation keeps its controls");
 
   const view = s.shown();
-  assert.equal(view.rows[0].id, "dismiss");
   assert.equal(view.tone, "danger");
-
-  view.rows[0].run();
-  assert.equal(s.item().label, "Converse: Thinking");
+  assert.equal(view.rows, undefined, "errors surface in the popover, not inline");
+  assert.equal(typeof view.menu, "function");
+  s.item().run();
+  assert.equal(s.panels.length, 1);
   s.cleanup();
 });
 

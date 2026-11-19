@@ -60,8 +60,8 @@ operations:
 
 Model URLs, sizes, and SHA-256 digests are recorded in
 [`assets/models.json`](assets/models.json). The same file defines the VAD, turn,
-ASR, and TTS roles and their runtime paths. No weights are shipped in the npm
-package. Review the asset terms before downloading or redistributing them.
+ASR, and TTS roles and their runtime paths. TTS is Gradium Phonon 31M (Apache-2.0
+weights; see `THIRD_PARTY.md`). No weights are shipped in the npm package. Review the asset terms before downloading or redistributing them.
 Models stay in `<state>/models`, so they are reused when the engine version
 changes.
 
@@ -99,13 +99,26 @@ target the server selected when the conversation starts. Rebuild, then use
 Open the desired workspace/server, then choose **Converse: start conversation**
 from the command palette or run `/converse-start`.
 
-| Command            | Action                                                |
-| ------------------ | ----------------------------------------------------- |
-| `/converse-start`  | Start a conversation on the selected server/workspace |
-| `/converse-stop`   | Stop and release the local runtime                    |
-| `/converse-mute`   | Mute or unmute microphone capture                     |
-| `/converse-open`   | Open the dedicated supervisor session                 |
-| `/converse-status` | Show conversation status                              |
+| Command             | Action                                                |
+| ------------------- | ----------------------------------------------------- |
+| `/converse-start`   | Start a conversation on the selected server/workspace |
+| `/converse-stop`    | Stop and release the local runtime                    |
+| `/converse-mute`    | Mute or unmute microphone capture                     |
+| `/converse-pause`   | Pause or resume spoken output                         |
+| `/converse-open`    | Open the dedicated supervisor session                 |
+| `/converse-details` | Show the live transcript, activity, and controls      |
+
+Click the Converse status control, or run `/converse-details`, to open the
+host's sidebar panel with the live transcript and pause/resume, mute,
+open-session, and stop controls. Narrow screens use the host's drawer. Click
+the composer status chip for a compact pop-up with the current activity and
+quick pause/resume, mute, transcript, and stop controls. Pausing spoken output
+keeps the local runtime, the supervisor, and any in-flight work running; the held
+speech continues on resume. Speaking while paused counts as an interruption and
+discards the held speech. If you cut a reply off, the transcript marks it
+"Interrupted" and shows the part you heard (an estimate; the agent's context is
+unchanged). `endpointing` (`responsive` or `patient`) tunes how long the engine
+waits in silence before ending your turn; see [configuration](docs/configuration.md).
 
 Ask the supervisor to delegate a task, inspect one of its workers, steer it, or
 stop it. It reports worker updates while you are listening. Worker permission

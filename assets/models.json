@@ -5,7 +5,7 @@
     "vad": "silero-vad",
     "turn": "smart-turn",
     "asr": "whisper-base-en",
-    "tts": "piper-lessac"
+    "tts": "phonon-31m-en"
   },
   "assets": [
     {
@@ -42,19 +42,42 @@
       }
     },
     {
-      "id": "piper-lessac",
-      "file": "vits-piper-en_US-lessac-medium.tar.bz2",
-      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2",
-      "sha256": "9e3febfacf0abf4270172d2958bcec246032b7e88efc2720840cc80c93de334e",
-      "bytes": 67230653,
-      "format": "tar.bz2",
-      "install": {
-        "root": "vits-piper-en_US-lessac-medium"
-      },
+      "id": "phonon-31m-en",
+      "format": "files",
+      "files": [
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/config.json",
+          "sha256": "b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85",
+          "bytes": 4634
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/tokenizer.json",
+          "sha256": "691a00068fa7b989f2f3e5ae5daa2d1a5bb319f2d5360deafcfb19a8bb6e7936",
+          "bytes": 277967
+        },
+        {
+          "path": "model.q8.gguf",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/model.q8.gguf",
+          "sha256": "a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae",
+          "bytes": 64512352
+        },
+        {
+          "path": "default-voice.safetensors",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/default-voice.safetensors",
+          "sha256": "dc537478eaadc1a5257fcda2e3501ab81e14c111a5d95a5838f350db2afd0f1a",
+          "bytes": 256136
+        },
+        {
+          "path": "LICENSE",
+          "url": "https://huggingface.co/gradium/phonon-31m-en/resolve/8f7a37c94a4c58b04c8287300c53f11d2e208eae/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        }
+      ],
       "runtime": {
-        "path": "tts/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx",
-        "tokens": "tts/vits-piper-en_US-lessac-medium/tokens.txt",
-        "dataDir": "tts/vits-piper-en_US-lessac-medium/espeak-ng-data"
+        "path": "tts-phonon-31m-en"
       }
     }
   ]

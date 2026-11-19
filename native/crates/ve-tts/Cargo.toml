@@ -3,15 +3,9 @@ name = "ve-tts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-build = "build.rs"
-description = "Piper synthesis through sherpa-onnx's cancellable C API"
+description = "Gradium Phonon 31M streaming synthesis through ptts, and inter-chunk audio joins"
 
 [dependencies]
 anyhow.workspace = true
-# The progress/cancellation entry point is not exposed by the blocking Rust wrapper.
-# This exact release downloads sherpa-onnx 1.12.9 with ONNX Runtime shared libraries.
-sherpa-rs = { version = "=0.6.8", default-features = false, features = [
-  "download-binaries",
-  "tts",
-  "sys",
-] }
+# Local-folder inference only: `hf` is the tokenizer, not the network. Never enable `hub`.
+ptts = { version = "=0.7.1", default-features = false, features = ["hf"] }

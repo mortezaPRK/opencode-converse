@@ -30,11 +30,16 @@
       "minimum": 1,
       "maximum": 256,
       "default": 4,
-      "description": "Piper inference thread count."
+      "description": "Accepted for compatibility with the settings contract; Phonon manages its own CPU threads, so this currently has no effect."
     },
     "useGpu": {
       "type": "boolean",
       "description": "Use GPU acceleration for Whisper when available. Defaults to true on macOS and false elsewhere."
+    },
+    "endpointing": {
+      "enum": ["responsive", "patient"],
+      "default": "responsive",
+      "description": "How long to wait in silence before treating your turn as finished. responsive: about 0.26 s before the end-of-turn check, 1.9 s hard stop. patient: about 0.64 s and 3 s, for slower or more thoughtful speech."
     }
   },
   "$defs": {

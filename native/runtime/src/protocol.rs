@@ -19,6 +19,15 @@ pub struct Settings {
     pub tts_threads: Option<u16>,
     #[serde(default)]
     pub use_gpu: Option<bool>,
+    #[serde(default)]
+    pub endpointing: Option<EndpointingSetting>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointingSetting {
+    Responsive,
+    Patient,
 }
 
 fn device<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -59,6 +68,9 @@ pub enum Host {
         message: String,
     },
     Mute {
+        on: bool,
+    },
+    Pause {
         on: bool,
     },
     Shutdown {},
@@ -151,8 +163,19 @@ pub enum Engine {
         turn: u64,
         text: String,
     },
+    /// `played_ms`/`generated_ms` describe the reply being cut off: audio the output
+    /// device actually consumed versus audio generated for it. Absent when no native
+    /// playback exists (fixtures) so hosts must treat them as optional.
     Interrupt {
         turn: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        played_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generated_ms: Option<u64>,
+        /// Spoken text the user heard before the cut (bounded). For transcripts only;
+        /// never agent context. Absent when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        heard: Option<String>,
     },
     Error {
         code: &'static str,
@@ -196,10 +219,18 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"useGpu":false}}"#,
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"useGpu":false,"endpointing":"patient"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
+        let Host::Init { settings, .. } = valid else {
+            unreachable!()
+        };
+        assert_eq!(settings.endpointing, Some(EndpointingSetting::Patient));
+        assert!(serde_json::from_str::<Host>(
+            r#"{"type":"init","protocol":1,"settings":{"endpointing":"fast"}}"#
+        )
+        .is_err());
         for value in [
             r#"{"type":"init","protocol":1,"settings":{"asrThreads":0}}"#,
             r#"{"type":"init","protocol":1,"settings":{"ttsThreads":257}}"#,
@@ -210,12 +241,36 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_progress_is_optional_on_the_wire() {
+        let bare = serde_json::to_string(&Engine::Interrupt {
+            turn: 1,
+            played_ms: None,
+            generated_ms: None,
+            heard: None,
+        })
+        .unwrap();
+        assert_eq!(bare, r#"{"type":"interrupt","turn":1}"#);
+        let full = serde_json::to_string(&Engine::Interrupt {
+            turn: 1,
+            played_ms: Some(900),
+            generated_ms: Some(2400),
+            heard: Some("Hi".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            full,
+            r#"{"type":"interrupt","turn":1,"played_ms":900,"generated_ms":2400,"heard":"Hi"}"#
+        );
+    }
+
+    #[test]
     fn strict_contract() {
         for s in [
             r#"{"type":"shutdown","extra":1}"#,
             r#"{"type":"init","protocol":1,"settings":{"voice":"x"}}"#,
             r#"{"type":"unknown"}"#,
             r#"{"type":"mute","on":1}"#,
+            r#"{"type":"pause","on":1}"#,
         ] {
             assert!(serde_json::from_str::<Host>(s).is_err(), "{s}");
         }

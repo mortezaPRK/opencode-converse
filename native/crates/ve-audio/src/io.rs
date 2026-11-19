@@ -71,6 +71,11 @@ struct PlaybackControl {
     /// SeqCst pairs this flag with generation checks, so either the producer sees
     /// cancellation before writing or the final drain waits until its writes end.
     producer_active: AtomicBool,
+    /// Monotonic device-rate frames the output callback actually consumed.
+    /// Written only by the callback (a single relaxed add); never reset.
+    played_frames: AtomicU64,
+    /// Monotonic `target_out_rate` samples accepted into the playback queue.
+    generated_samples: AtomicU64,
 }
 
 struct OutputWrite<'a>(&'a AtomicBool);
@@ -138,6 +143,8 @@ pub struct AudioIo {
     queued: Arc<AtomicUsize>,
     /// Frames at the device rate waiting in the device ring (resampling path only).
     dev_queued: Arc<AtomicUsize>,
+    /// User-requested pause: the callback emits silence but keeps the queue intact.
+    paused: Arc<AtomicBool>,
     underruns: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
@@ -305,6 +312,7 @@ impl AudioIo {
         let control = Arc::new(PlaybackControl::default());
         let queued = Arc::new(AtomicUsize::new(0));
         let dev_queued = Arc::new(AtomicUsize::new(0));
+        let paused = Arc::new(AtomicBool::new(false));
         let underruns = Arc::new(AtomicU64::new(0));
 
         let (engine_prod, engine_cons) = rtrb::RingBuffer::<OutputFrame>::new(
@@ -337,6 +345,7 @@ impl AudioIo {
 
         let cb_control = control.clone();
         let cb_queued = active_queued.clone();
+        let cb_paused = paused.clone();
         let cb_underruns = underruns.clone();
         let callback_failed = failed.clone();
         let mut last_gen = 0u64;
@@ -354,10 +363,11 @@ impl AudioIo {
                     let channels = out_channels as usize;
                     let frames = data.len() / channels;
 
-                    if cb_control.muted.load(Ordering::Acquire)
+                    if cb_paused.load(Ordering::Acquire)
+                        || cb_control.muted.load(Ordering::Acquire)
                         || cb_control.flush_gen.load(Ordering::SeqCst) != last_gen
                     {
-                        // Barge-in in progress: silence now, and do not consume the queue.
+                        // Paused or barge-in in progress: silence and keep the queue for resume.
                         data.fill(0.0);
                         return;
                     }
@@ -395,6 +405,9 @@ impl AudioIo {
                         cb_underruns.fetch_add(1, Ordering::Relaxed);
                     }
                     if got > 0 {
+                        cb_control
+                            .played_frames
+                            .fetch_add(got as u64, Ordering::Relaxed);
                         let _ = cb_queued.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                             Some(v.saturating_sub(got))
                         });
@@ -420,10 +433,20 @@ impl AudioIo {
             control,
             queued,
             dev_queued,
+            paused,
             underruns,
             stop,
             failed,
         })
+    }
+
+    /// Pauses or resumes playback without flushing queued audio or stopping the stream.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Release);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
     }
 
     /// Includes device callback errors and unexpected DSP worker exits.
@@ -476,6 +499,9 @@ impl AudioIo {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(samples.len() - accepted))
             });
+        self.control
+            .generated_samples
+            .fetch_add(accepted as u64, Ordering::Relaxed);
         if accepted != samples.len() {
             return Err(anyhow!("Bounded playback queue is full"));
         }
@@ -541,6 +567,15 @@ impl AudioIo {
     ///
     /// Reported at `target_out_rate`. In the resampling path the device-side queue is
     /// converted back from the device rate, so this is accurate to within one chunk.
+    pub fn playback_progress(&self) -> PlaybackProgress {
+        progress_ms(
+            self.control.played_frames.load(Ordering::Relaxed),
+            self.output_rate,
+            self.control.generated_samples.load(Ordering::Relaxed),
+            self.target_out_rate,
+        )
+    }
+
     pub fn output_queued_frames(&self) -> usize {
         self.output_queued_snapshot(|| {})
     }
@@ -583,6 +618,7 @@ impl Drop for AudioIo {
 }
 
 /// Resamples `in_rate` → `out_rate` off the audio thread and emits `block_frames` blocks.
+#[allow(clippy::too_many_arguments)] // Each argument is a distinct worker resource; a bundle struct would only rename them.
 fn spawn_input_worker(
     mut cons: rtrb::Consumer<InputFrame>,
     mut on_input: Box<dyn FnMut(CaptureEvent<'_>) + Send>,
@@ -817,6 +853,27 @@ fn spawn_output_worker(
     }))
 }
 
+/// Monotonic playback totals in milliseconds. `played_ms` counts audio the output
+/// device callback actually consumed; `generated_ms` counts audio accepted for playback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackProgress {
+    pub played_ms: u64,
+    pub generated_ms: u64,
+}
+
+fn progress_ms(
+    played_frames: u64,
+    output_rate: u32,
+    generated_samples: u64,
+    target_rate: u32,
+) -> PlaybackProgress {
+    let ms = |n: u64, rate: u32| n.saturating_mul(1000) / u64::from(rate.max(1));
+    PlaybackProgress {
+        played_ms: ms(played_frames, output_rate),
+        generated_ms: ms(generated_samples, target_rate),
+    }
+}
+
 /// Pushes as much of `data` as fits, returning how many frames were accepted.
 fn push_some(prod: &mut rtrb::Producer<OutputFrame>, data: &[f32]) -> usize {
     let mut pushed = 0;
@@ -962,6 +1019,21 @@ mod tests {
     }
 
     #[test]
+    fn pause_keeps_queued_pcm_for_resume() {
+        let (io, mut dev) = equal_playback();
+        io.push_output(&[0.25, -0.5, 0.75]).unwrap();
+        io.set_paused(true);
+        assert!(io.is_paused());
+        io.set_paused(false);
+        assert!(!io.is_paused());
+        // Pause only gates callback consumption; the queued PCM is untouched.
+        assert_eq!(io.output_queued_frames(), 3);
+        for expected in [0.25, -0.5, 0.75] {
+            assert!(matches!(dev.pop(), Ok(OutputFrame::Sample(s)) if s == expected));
+        }
+    }
+
+    #[test]
     fn acknowledged_cancel_cannot_erase_new_equal_rate_pcm_count() {
         let (io, mut dev) = equal_playback();
         let mut last_gen = 0;
@@ -991,6 +1063,7 @@ mod tests {
                 control: Arc::new(PlaybackControl::default()),
                 queued: Arc::new(AtomicUsize::new(0)),
                 dev_queued: Arc::new(AtomicUsize::new(0)),
+                paused: Arc::new(AtomicBool::new(false)),
                 underruns: Arc::new(AtomicU64::new(0)),
                 stop: Arc::new(AtomicBool::new(false)),
                 failed: Arc::new(AtomicBool::new(false)),
@@ -1161,6 +1234,7 @@ mod tests {
                 control,
                 queued,
                 dev_queued,
+                paused: Arc::new(AtomicBool::new(false)),
                 underruns: Arc::new(AtomicU64::new(0)),
                 stop,
                 failed,
@@ -1262,6 +1336,23 @@ mod tests {
         assert!(dev.pop().is_err());
         assert!(!io.failed());
         out
+    }
+
+    #[test]
+    fn progress_reports_played_and_generated_in_their_own_rates() {
+        let p = progress_ms(24_000, 48_000, 24_000, 24_000);
+        assert_eq!((p.played_ms, p.generated_ms), (500, 1000));
+        assert_eq!(progress_ms(0, 0, 0, 0), PlaybackProgress::default());
+    }
+
+    #[test]
+    fn generated_progress_counts_accepted_samples_and_survives_flush() {
+        let (io, _dev) = playback(Arc::new(PlaybackControl::default()));
+        io.push_output(&vec![0.1; 2_400]).unwrap();
+        assert_eq!(io.playback_progress().generated_ms, 100);
+        assert_eq!(io.playback_progress().played_ms, 0);
+        io.flush_output();
+        assert_eq!(io.playback_progress().generated_ms, 100);
     }
 
     #[test]
