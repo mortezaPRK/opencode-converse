@@ -46,6 +46,16 @@ architectures are not implied by operating-system support.
 - Measure first-audio and interruption latency on representative hardware.
 - Compare `endpointing: "responsive"` and `"patient"` on a fixed sample with natural
   mid-sentence pauses: record premature cut-offs and added end-of-turn latency.
+- Acknowledgement: with a slow supervisor, the neutral cue starts about 0.6 s after
+  the turn is sent (cached, no synthesis delay), is spoken at most once per turn,
+  never claims success, and is absent from the agent context and transcript. Check
+  that it is not spoken for empty/rejected transcripts, after barge-in, while paused
+  or muted, or for worker announcements; that a reply starting during the cue
+  follows it without overlap or a dropped first word; that barge-in cuts it
+  instantly; and that `acknowledgement: "off"` is silent.
+- First-audio latency: record reply-first-delta to first audible sound on
+  representative hardware (run `speech_quality`'s timeline); the early first-chunk
+  cut must not produce audibly choppy prosody on a fixed set of replies with commas.
 - Check the Interrupted note in the transcript against what was actually audible on
   a real device: the heard text must match what was played, within a word or two,
   and must never be added to agent context.

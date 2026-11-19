@@ -102,6 +102,14 @@ test("runtime sends endpointing over init", async () => {
   await runtime.stop();
 });
 
+test("runtime sends acknowledgement over init", async () => {
+  const { proc, runtime } = setup({ runtime: { acknowledgement: "off" } });
+  proc.frame({ type: "hello", protocol: 1 });
+  await runtime.ready;
+  assert.equal(proc.frames[0].settings.acknowledgement, "off");
+  await runtime.stop();
+});
+
 test("runtimeSettings contains only inference tuning", () => {
   assert.deepEqual(runtimeSettings({ asrThreads: 2 }), {
     asrThreads: 2,

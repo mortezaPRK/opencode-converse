@@ -1,9 +1,9 @@
 # Speech and audio stack research — November 2026
 
-Status: **research, partly implemented** as of 19 November 2026 (engine 0.3.0). The original document of
+Status: **research, partly implemented** as of 19 November 2026 (engine 0.4.0). The original document of
 18 November 2026 was research only. Since then: Piper/sherpa-onnx was replaced by Gradium Phonon 31M (`ptts`); Whisper `base.en` was replaced by Moonshine v2 Small Streaming (§6.4, phase one);
 played/generated sample accounting reports what was actually heard on interrupt; `endpointing: responsive|patient`
-was added; spoken output can be paused; Silero VAD was already v6.2. Sections describing Piper are the
+was added; spoken output can be paused; engine 0.4.0 adds a cached neutral acknowledgement (§5.4/§6, `acknowledgement: auto|off`) and an earlier first chunk (clause cut after ≥4 words); Silero VAD was already v6.2. Sections describing Piper are the
 pre-change baseline. The document exists to make future changes cheap to justify and easy to
 reject.
 
@@ -427,6 +427,17 @@ stop/acknowledgement audio < 300 ms. These are product SLO proposals, not measur
 Two cheap structural wins: keep **acknowledgement latency** separate from **answer
 latency** (say something true quickly, then report), and let speculation remove stages
 from the critical path without ever letting a partial "yes" authorise an action.
+
+**Status (engine 0.4.0).** Implemented: after a committed turn, if no reply audio has
+started within 600 ms, the Rust controller plays one cached neutral phrase ("Okay.",
+"On it.", "Let me check."; synthesized once at engine start, ~0 ms synthesis per turn).
+It claims nothing, is never in agent context or the transcript, and respects barge-in,
+pause, and mute. The first chunk of a reply may also cut at the first clause once it has
+≥4 words. Measured warm on a loaded development Mac (`speech_quality` timeline, words
+streaming every 40 ms): a reply opening with a 20-word clause-led sentence reached first
+audio ~358 ms after the first delta instead of ~855 ms; replies that already open with a
+short sentence or a clause past the first full sentence are unchanged. Real-device,
+speaker, and subjective-prosody checks remain release-gate items.
 
 ---
 

@@ -17,10 +17,14 @@ export interface LocalSettings {
   asrThreads?: number;
   ttsThreads?: number;
   endpointing?: Endpointing;
+  acknowledgement?: Acknowledgement;
 }
 
 /** How long the engine waits in silence before treating the user's turn as finished. */
 export type Endpointing = "responsive" | "patient";
+
+/** Whether the engine speaks a short neutral cue while the supervisor is still thinking. */
+export type Acknowledgement = "auto" | "off";
 
 export type EngineMessage =
   | { type: "hello"; protocol: 1 }

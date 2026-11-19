@@ -1,6 +1,13 @@
 use crate::protocol::{Engine, Host, Reason, Status, MAX_TEXT_BYTES};
 use crate::speech::Speech;
 use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+/// Silence after a committed user turn before a short acknowledgement is spoken.
+pub const ACK_DELAY: Duration = Duration::from_millis(600);
+/// Neutral, success-free phrases, synthesized once at engine start and rotated.
+/// They are never sent to the agent or the host transcript.
+pub const ACK_PHRASES: [&str; 3] = ["Okay.", "On it.", "Let me check."];
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
@@ -10,6 +17,8 @@ pub enum Action {
     Finish,
     Mute(bool),
     Pause(bool),
+    /// Play the cached acknowledgement phrase with this index, on the current generation.
+    Ack(usize),
 }
 
 struct Reply {
@@ -37,6 +46,10 @@ pub struct Controller {
     speech_chunks: usize,
     speech_clipped: bool,
     paused: bool,
+    /// Set once at start; never in fixture mode, which must stay deterministic.
+    pub ack_enabled: bool,
+    ack_armed: Option<Instant>,
+    ack_next: usize,
 }
 
 impl Default for Controller {
@@ -57,6 +70,9 @@ impl Default for Controller {
             speech_chunks: 0,
             speech_clipped: false,
             paused: false,
+            ack_enabled: false,
+            ack_armed: None,
+            ack_next: 0,
         }
     }
 }
@@ -74,6 +90,9 @@ impl Controller {
         }
         const LIMIT: usize = 48;
         let overflow = clipped || self.speech_chunks.saturating_add(chunks.len()) > LIMIT;
+        if !chunks.is_empty() {
+            self.ack_armed = None;
+        }
         for chunk in chunks
             .into_iter()
             .take(LIMIT.saturating_sub(self.speech_chunks))
@@ -116,6 +135,35 @@ impl Controller {
         self.reply = None;
         self.playing = false;
         self.announcing = false;
+        self.ack_armed = None;
+    }
+    /// Speak one cached acknowledgement if reply audio has not begun within
+    /// `ACK_DELAY` of the committed turn. At most once per turn; never while
+    /// paused, muted, listening, or after cancellation. It does not change the
+    /// voice status: the assistant is still thinking.
+    pub fn poll_ack(&mut self, now: Instant, actions: &mut Vec<Action>) {
+        let Some(armed) = self.ack_armed else { return };
+        if now.saturating_duration_since(armed) < ACK_DELAY {
+            return;
+        }
+        self.ack_armed = None;
+        if !self.ack_enabled
+            || !self.ready
+            || !self.active
+            || self.muted
+            || self.paused
+            || self.hearing.is_some()
+            || self.playing
+            || self.speech_chunks > 0
+        {
+            return;
+        }
+        actions.push(Action::Ack(self.ack_next));
+        self.ack_next = (self.ack_next + 1) % ACK_PHRASES.len();
+    }
+    #[cfg(test)]
+    fn armed_at(&self) -> Option<Instant> {
+        self.ack_armed
     }
     fn invalidate_announcements(&mut self) {
         self.announcements.clear();
@@ -199,6 +247,7 @@ impl Controller {
         }
         self.turn += 1;
         self.active = true;
+        self.ack_armed = self.ack_enabled.then(Instant::now);
         self.finished.clear();
         self.speech_chunks = 0;
         self.speech_clipped = false;
@@ -303,6 +352,7 @@ impl Controller {
                     return Ok(());
                 }
                 if reason == Reason::Completed {
+                    self.ack_armed = None;
                     if let Some(reply) = self.reply.take() {
                         self.finish_reply(reply, out, actions);
                     }
@@ -775,5 +825,177 @@ mod tests {
         assert!(!a.iter().any(|a| matches!(a, Action::Speak(_))));
         c.hearing(2, &mut out, &mut a);
         assert!(c.announcements.is_empty());
+    }
+
+    fn acking() -> Controller {
+        let mut c = Controller {
+            ack_enabled: true,
+            ..Controller::default()
+        };
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        c.hearing(1, &mut out, &mut a);
+        c.transcript(1, "test prompt".into(), &mut out, &mut a);
+        c
+    }
+    fn due(c: &mut Controller) -> Vec<Action> {
+        let mut a = vec![];
+        let at = c.armed_at().map_or_else(Instant::now, |t| t + ACK_DELAY);
+        c.poll_ack(at, &mut a);
+        a
+    }
+    #[test]
+    fn acknowledges_once_after_the_delay_and_rotates_phrases() {
+        let mut c = acking();
+        let armed = c.armed_at().unwrap();
+        let mut a = vec![];
+        c.poll_ack(armed + ACK_DELAY - Duration::from_millis(1), &mut a);
+        assert!(a.is_empty(), "too early");
+        c.poll_ack(armed + ACK_DELAY, &mut a);
+        assert_eq!(a, [Action::Ack(0)]);
+        assert_eq!(c.status, Status::Thinking, "acknowledging is not replying");
+        assert!(due(&mut c).is_empty(), "at most one per turn");
+        for expected in [1, 2, 0] {
+            let (mut out, mut a) = (vec![], vec![]);
+            c.hearing(9, &mut out, &mut a);
+            c.transcript(9, "again".into(), &mut out, &mut a);
+            assert_eq!(due(&mut c), [Action::Ack(expected)]);
+        }
+    }
+    #[test]
+    fn phrases_are_short_and_claim_nothing() {
+        for phrase in ACK_PHRASES {
+            assert!(phrase.split_whitespace().count() <= 3);
+            let lower = phrase.to_lowercase();
+            for word in ["done", "fixed", "finished", "complete", "success", "ready"] {
+                assert!(!lower.contains(word), "{phrase}");
+            }
+        }
+    }
+    #[test]
+    fn disabled_by_default_and_for_unusable_transcripts() {
+        let mut c = active();
+        assert!(c.armed_at().is_none());
+        assert!(due(&mut c).is_empty());
+        let mut c = Controller {
+            ack_enabled: true,
+            ..Controller::default()
+        };
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        c.hearing(1, &mut out, &mut a);
+        c.transcript(1, "  \t ".into(), &mut out, &mut a);
+        assert!(c.armed_at().is_none());
+        c.hearing(2, &mut out, &mut a);
+        c.transcript(2, "x".repeat(MAX_TEXT_BYTES + 1), &mut out, &mut a);
+        assert!(c.armed_at().is_none());
+    }
+    #[test]
+    fn barge_in_cancel_and_failure_disarm() {
+        let (mut out, mut a) = (vec![], vec![]);
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        c.hearing(2, &mut out, &mut a);
+        c.poll_ack(at, &mut a);
+        assert!(!a.contains(&Action::Ack(0)));
+        for reason in [Reason::Interrupted, Reason::Failed, Reason::Disconnected] {
+            let mut c = acking();
+            let at = c.armed_at().unwrap() + ACK_DELAY;
+            c.host(Host::TurnEnd { turn: 1, reason }, &mut out, &mut a)
+                .unwrap();
+            c.poll_ack(at, &mut a);
+            assert!(!a.contains(&Action::Ack(0)));
+        }
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        c.host(
+            Host::PromptFailed {
+                turn: 1,
+                message: String::new(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        c.poll_ack(at, &mut a);
+        assert!(!a.contains(&Action::Ack(0)));
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        c.host(
+            Host::TurnEnd {
+                turn: 1,
+                reason: Reason::Completed,
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        c.poll_ack(at, &mut a);
+        assert!(!a.contains(&Action::Ack(0)), "no ack after completion");
+    }
+    #[test]
+    fn muted_or_paused_output_is_never_acknowledged() {
+        let (mut out, mut a) = (vec![], vec![]);
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        c.host(Host::Mute { on: true }, &mut out, &mut a).unwrap();
+        c.host(Host::Mute { on: false }, &mut out, &mut a).unwrap();
+        a.clear();
+        c.poll_ack(at, &mut a);
+        assert!(a.is_empty());
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
+        a.clear();
+        c.poll_ack(at, &mut a);
+        assert!(a.is_empty());
+        c.host(Host::Pause { on: false }, &mut out, &mut a).unwrap();
+        a.clear();
+        c.poll_ack(at, &mut a);
+        assert!(a.is_empty(), "a paused deadline is dropped, not deferred");
+    }
+    #[test]
+    fn early_reply_audio_suppresses_the_acknowledgement() {
+        let mut c = acking();
+        let at = c.armed_at().unwrap() + ACK_DELAY;
+        assert!(!reply(&mut c, "Here is the answer. ", false).is_empty());
+        let mut a = vec![];
+        c.poll_ack(at, &mut a);
+        assert!(a.is_empty());
+        // Text that has not yet formed a chunk is not audio: still acknowledged.
+        let mut c = acking();
+        assert!(reply(&mut c, "Here is", false).is_empty());
+        assert_eq!(due(&mut c), [Action::Ack(0)]);
+    }
+    #[test]
+    fn reply_after_the_acknowledgement_queues_behind_it_without_cancelling() {
+        let mut c = acking();
+        assert_eq!(due(&mut c), [Action::Ack(0)]);
+        let a = reply(&mut c, "Here is the answer. ", false);
+        assert_eq!(a, [Action::Speak("Here is the answer.".into())]);
+        assert!(!a.contains(&Action::Cancel));
+        let a = reply(&mut c, "Here is the answer. More.", true);
+        assert_eq!(a, [Action::Speak("More.".into())]);
+    }
+    #[test]
+    fn worker_announcements_are_never_acknowledged() {
+        let mut c = Controller {
+            ack_enabled: true,
+            ..Controller::default()
+        };
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        c.host(
+            Host::Announcement {
+                reply: "w".into(),
+                text: "A worker finished.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert!(a.iter().any(|x| matches!(x, Action::Speak(_))));
+        assert!(c.armed_at().is_none());
+        assert!(due(&mut c).is_empty());
     }
 }

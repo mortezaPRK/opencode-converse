@@ -1732,6 +1732,8 @@ test("server options validate models, runtime paths, and reject unknown fields",
     { useGpu: true },
     { endpointing: "fast" },
     { endpointing: 1 },
+    { acknowledgement: "loud" },
+    { acknowledgement: true },
   ]) {
     assert.throws(() => parseOptions(value));
   }
@@ -1749,6 +1751,8 @@ test("server options validate models, runtime paths, and reject unknown fields",
     },
   );
   assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, { endpointing: "patient" });
+  assert.deepEqual(parseOptions({ acknowledgement: "off" }).runtime, { acknowledgement: "off" });
+  assert.deepEqual(parseOptions({ acknowledgement: "auto" }).runtime, { acknowledgement: "auto" });
   assert.deepEqual(parseOptions({ $schema: "ignored" }), { runtime: {} });
   assert.deepEqual(parseOptions({}), { runtime: {} });
 });

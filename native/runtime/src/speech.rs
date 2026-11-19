@@ -4,6 +4,9 @@
 // Keep complete sentences when possible, without allowing unbounded synthesis.
 const MAX_CHUNK_BYTES: usize = 320;
 const MAX_CHUNK_WORDS: usize = 40;
+/// The first chunk of a reply may end at the first clause boundary once it holds
+/// this many words, so synthesis can start before a whole sentence has arrived.
+const MIN_FIRST_CLAUSE_WORDS: usize = 4;
 
 pub struct Speech {
     raw: String,
@@ -12,6 +15,7 @@ pub struct Speech {
     inline: Option<usize>,
     line_start: bool,
     quote_prefix: bool,
+    emitted: bool,
 }
 
 impl Default for Speech {
@@ -23,6 +27,7 @@ impl Default for Speech {
             inline: None,
             line_start: true,
             quote_prefix: true,
+            emitted: false,
         }
     }
 }
@@ -189,6 +194,7 @@ impl Speech {
 
     fn chunks_with(&mut self, final_: bool, mut emit: impl FnMut(&str)) {
         let mut processed = 0;
+        let mut first = !self.emitted;
         loop {
             let pending = &self.pending[processed..];
             // Decide forced cuts from a fixed prefix, not the size of a provider
@@ -226,6 +232,30 @@ impl Speech {
                         None
                     }
                 });
+            // Decided from the prefix alone, like every other cut: the earliest of
+            // a sentence end or an eligible clause end, each needing one character
+            // of lookahead, so delta boundaries cannot change the result.
+            let early = if first {
+                pending
+                    .char_indices()
+                    .take_while(|(i, c)| i + c.len_utf8() <= horizon)
+                    .filter(|(_, c)| matches!(c, ',' | ';' | ':' | '—' | '–'))
+                    .find_map(|(i, c)| {
+                        let end = i + c.len_utf8();
+                        (pending[end..]
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_whitespace)
+                            && pending[..end].split_whitespace().count() >= MIN_FIRST_CLAUSE_WORDS)
+                            .then_some(end)
+                    })
+            } else {
+                None
+            };
+            let punctuation = match (punctuation, early) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let forced = word_bound.is_some() || pending.len() > MAX_CHUNK_BYTES;
             let cut = punctuation.or_else(|| {
                 if !forced {
@@ -270,6 +300,8 @@ impl Speech {
             let text = pending[..cut].trim();
             if !text.is_empty() {
                 emit(text);
+                first = false;
+                self.emitted = true;
             }
             processed += cut;
         }
@@ -277,6 +309,7 @@ impl Speech {
             let text = self.pending[processed..].trim();
             if !text.is_empty() {
                 emit(text);
+                self.emitted = true;
             }
             processed = self.pending.len();
         }
@@ -438,6 +471,52 @@ mod tests {
                 assert_eq!(out.join(" "), expected, "split {split}: {text}");
             }
         }
+    }
+    #[test]
+    fn first_chunk_cuts_at_an_early_clause_and_later_chunks_keep_sentences() {
+        for (text, expected) in [
+            (
+                "Sure, I can look at that, and then explain what I find. Next, we compare, then decide.",
+                vec![
+                    "Sure, I can look at that,",
+                    "and then explain what I find.",
+                    "Next, we compare, then decide.",
+                ],
+            ),
+            // Too few words before the comma: wait for the sentence end.
+            ("Okay, sure. Then, a second one, here.", vec!["Okay, sure.", "Then, a second one, here."]),
+            // A sentence that ends first wins over a later clause.
+            ("Yes it is. Well, maybe, but not today.", vec!["Yes it is.", "Well, maybe, but not today."]),
+            ("Here is the plan: first, we read the code. Then we edit.", vec!["Here is the plan:", "first, we read the code.", "Then we edit."]),
+        ] {
+            assert_eq!(Speech::default().push(text, true), expected, "{text}");
+            for split in 0..=text.len().min(60) {
+                if !text.is_char_boundary(split) {
+                    continue;
+                }
+                let mut speech = Speech::default();
+                let mut chunks = speech.push(&text[..split], false);
+                chunks.extend(speech.push(&text[split..], false));
+                chunks.extend(speech.push("", true));
+                assert_eq!(chunks, expected, "split {split}: {text}");
+            }
+            // One byte at a time.
+            let mut speech = Speech::default();
+            let mut chunks = vec![];
+            for (i, c) in text.char_indices() {
+                chunks.extend(speech.push(&text[i..i + c.len_utf8()], false));
+            }
+            chunks.extend(speech.push("", true));
+            assert_eq!(chunks, expected, "per-char: {text}");
+        }
+    }
+    #[test]
+    fn early_clause_waits_for_following_whitespace() {
+        let mut speech = Speech::default();
+        assert!(speech.push("Sure, I can look at that,", false).is_empty());
+        assert_eq!(speech.push(" and", false), ["Sure, I can look at that,"]);
+        let mut speech = Speech::default();
+        assert!(speech.push("Version 1,000 is large", false).is_empty());
     }
     #[test]
     fn decimal_and_version_chunks_are_stable_at_every_delta_split() {

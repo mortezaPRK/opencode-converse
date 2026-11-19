@@ -120,7 +120,9 @@ speech continues on resume. Speaking while paused counts as an interruption and
 discards the held speech. If you cut a reply off, the transcript marks it
 "Interrupted" and shows the part you heard (an estimate; the agent's context is
 unchanged). `endpointing` (`responsive` or `patient`) tunes how long the engine
-waits in silence before ending your turn; see [configuration](docs/configuration.md).
+waits in silence before ending your turn; `acknowledgement` (`auto` or `off`)
+controls a short neutral spoken cue ("Okay.", "On it.") when the reply is slow to
+start; see [configuration](docs/configuration.md).
 
 The transcript (latest 50 entries) is kept by the voice bridge, not read from the
 host's session cache, so it shows your spoken prompts and the supervisor's
@@ -152,7 +154,7 @@ The engine and speech-model locations are fixed under the app state folder.
 There is no engine, data, or model path option and no `CONVERSE_BIN` override.
 The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
-versions. `asrThreads`, `ttsThreads`, and `endpointing` are the only runtime tuning
+versions. `asrThreads`, `ttsThreads`, `endpointing`, and `acknowledgement` are the only runtime tuning
 options. OpenCode owns provider credentials; they are never passed to the Rust
 process. Device preferences stay in host storage.
 
