@@ -3,6 +3,11 @@ name: Native build
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      version:
+        description: Stamp this version into the sources before building (release only).
+        type: string
+        default: ""
   pull_request:
     paths:
       - native/**
@@ -71,7 +76,12 @@ jobs:
         run: |
           choco install llvm --yes --no-progress --limit-output || true
           echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
-      # A release workflow can add a pre-build step here (for example version stamping).
+      - name: Set release version
+        if: inputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/set-version.mjs "$VERSION"
       - name: Build engine
         if: runner.os != 'Windows'
         run: node native/scripts/build.mjs

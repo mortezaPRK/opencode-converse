@@ -1,0 +1,223 @@
+name: Release
+
+# Manual. Run it on main for a stable release, or on a branch with an open pull
+# request for a prerelease (`<next>-pr.<PR>.<run>`, npm dist-tag `pr`).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check only; do not tag, release, or publish
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      pr: ${{ steps.mode.outputs.pr }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          cache: npm
+      - name: Select mode
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref }}
+          BRANCH: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF" = refs/heads/main ]; then
+            echo "mode=stable" >> "$GITHUB_OUTPUT"
+            echo "pr=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$REF_TYPE" != branch ]; then
+            echo "::error::Run the release from main or from a branch with an open pull request"
+            exit 1
+          fi
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
+            --json number,headRepositoryOwner \
+            --jq "[.[] | select(.headRepositoryOwner.login == \"$GITHUB_REPOSITORY_OWNER\")][0].number // empty")
+          if [ -z "$pr" ]; then
+            echo "::error::Branch $BRANCH has no open pull request in this repository"
+            exit 1
+          fi
+          echo "mode=pr" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+      - name: Compute version
+        id: version
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          PR: ${{ steps.mode.outputs.pr }}
+          RUN: ${{ github.run_number }}
+        run: |
+          version=$(node scripts/release-version.mjs "--mode=$MODE" "--pr=$PR" "--run=$RUN")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "::error::Tag v$version already exists"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version ($MODE)" >> "$GITHUB_STEP_SUMMARY"
+      - run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  build:
+    name: Build engines
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    name: Publish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    env:
+      MODE: ${{ needs.prepare.outputs.mode }}
+      PR: ${{ needs.prepare.outputs.pr }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          # Stable releases push to main with the release token; everything else uses the job token.
+          token: ${{ needs.prepare.outputs.mode == 'stable' && !inputs.dry_run && secrets.RELEASE_PAT || github.token }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org
+          scope: "@mortz.prk"
+      - run: npm install --global npm@11
+      - run: node scripts/set-version.mjs "$VERSION"
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: engine-*
+          path: engines
+      - name: Write engine manifest
+        run: node scripts/write-engine-manifest.mjs write "$VERSION" engines release-assets
+      - run: npm run check
+      - run: npm test
+      - name: Check the package contents
+        run: |
+          npm pack --dry-run --ignore-scripts --json > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const files = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[0].files.map((f) => f.path);
+            for (const need of ["assets/engines.json", "native/THIRD_PARTY.md", "dist/index.js"])
+              if (!files.includes(need)) throw new Error("package is missing " + need);
+            if (files.some((f) => f.startsWith("assets/bin") || f.startsWith("native/target")))
+              throw new Error("package contains engine binaries");
+          ' "$RUNNER_TEMP/pack.json"
+      - name: Dry run summary
+        if: inputs.dry_run
+        run: |
+          {
+            echo "### Dry run"
+            echo "Would release **$VERSION** ($MODE) as tag \`$TAG\`:"
+            echo '```'
+            ls -l release-assets
+            echo '```'
+            if [ "$MODE" = stable ]; then
+              echo "- commit \"Release v$VERSION\" and push main and the tag"
+              echo "- npm publish (dist-tag latest)"
+            else
+              echo "- push only the tag from a detached commit (PR #$PR)"
+              echo "- npm publish --tag pr"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Commit and tag
+        if: "!inputs.dry_run"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$MODE" != stable ]; then git switch --detach; fi
+          git add package.json package-lock.json native/Cargo.toml native/Cargo.lock \
+            src/client/engine.ts assets/engines.json
+          git commit -m "Release v$VERSION"
+          git tag -a "$TAG" -m "Release v$VERSION"
+          if [ "$MODE" = stable ]; then
+            git push --atomic origin HEAD:main "$TAG"
+          else
+            git push origin "refs/tags/$TAG"
+          fi
+          echo "TAG_PUSHED=true" >> "$GITHUB_ENV"
+      - name: Create draft release
+        if: "!inputs.dry_run"
+        run: |
+          flags=()
+          if [ "$MODE" != stable ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG" \
+            "${flags[@]}" release-assets/* native/THIRD_PARTY.md
+          echo "DRAFT_CREATED=true" >> "$GITHUB_ENV"
+      - name: Verify uploaded assets
+        if: "!inputs.dry_run"
+        run: |
+          mkdir verify
+          gh release download "$TAG" --dir verify --pattern 'opencode-converse-*'
+          node scripts/write-engine-manifest.mjs verify verify
+      - name: Publish to npm
+        id: npm
+        if: "!inputs.dry_run"
+        run: |
+          flags=()
+          if [ "$MODE" != stable ]; then flags+=(--tag pr); fi
+          npm publish --access public --ignore-scripts --registry=https://registry.npmjs.org "${flags[@]}"
+      - name: Publish the release
+        if: "!inputs.dry_run"
+        run: |
+          if [ "$MODE" = stable ]; then
+            gh release edit "$TAG" --draft=false --latest
+          else
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          fi
+      - name: Comment on the pull request
+        if: "!inputs.dry_run && needs.prepare.outputs.mode == 'pr'"
+        run: |
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" \
+            --body "Prerelease published: \`@mortz.prk/opencode-converse@$VERSION\` (npm tag \`pr\`). Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+      - name: Clean up an unpublished release
+        if: failure() && steps.npm.outcome != 'success'
+        run: |
+          if [ "${DRAFT_CREATED:-}" = true ]; then
+            if [ "$MODE" = stable ]; then
+              gh release delete "$TAG" --yes || true
+            else
+              gh release delete "$TAG" --yes --cleanup-tag || true
+            fi
+          elif [ "${TAG_PUSHED:-}" = true ] && [ "$MODE" != stable ]; then
+            git push origin --delete "refs/tags/$TAG" || true
+          fi

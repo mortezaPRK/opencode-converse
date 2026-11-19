@@ -42,7 +42,7 @@ Whisper is no longer shipped: the ASR crate, whisper.cpp, GGML, and the Whisper
 weights are removed. The Smart Turn feature frontend still uses a Rust port of the
 Hugging Face Transformers Whisper log-mel math (Apache-2.0; see
 `native/THIRD_PARTY.md`).
-This inventory does not establish blanket native redistribution clearance.
+This inventory is not a completed exact-artifact license review.
 
 Echo cancellation is **WebRTC AEC3** from `webrtc-audio-processing` 2.1.0 (tonarino Rust
 wrapper and the PulseAudio repackaging of Google's WebRTC audio processing, built from
@@ -54,10 +54,11 @@ rnnoise-derived (Mozilla/Xiph/Jean-Marc Valin, BSD-3) sources, and builds agains
 abseil-cpp (Apache-2.0) fetched by meson. See `native/THIRD_PARTY.md`. Binary
 redistribution must carry these notices; the exact-artifact review is still required.
 
-Before distributing native bundles, inventory the exact shipped libraries and
-their resolved source revisions, collect all required notices, and determine
-source-distribution and other obligations for the resulting bundle. Source-only
-CI artifacts are not evidence that a native bundle is cleared for redistribution.
+Engines are published on GitHub releases (built in CI from this source, tested only on
+Apple silicon). Each carries these notices through `native/THIRD_PARTY.md`. A review
+of the exact shipped libraries, their resolved source revisions, and any
+source-distribution obligations has not been completed; do not read a published
+engine as a license audit.
 
 Speech assets need separate verification:
 
@@ -68,8 +69,7 @@ Speech assets need separate verification:
 | Moonshine Small | Exact `.ort` files and tokenizer (hash-pinned), MIT notice from the pinned upstream `LICENSE`                    |
 | Phonon 31M      | Exact weights/tokenizer/voice commit, Apache-2.0 notice, Kyutai (Pocket TTS/Mimi) attribution and upstream terms |
 
-No model weights are included in the npm package. The package may include a
-prebuilt engine under `assets/bin/`; those are
-third-party-bearing artifacts and require exact-artifact license review before
-redistribution. Do not publish native release bundles or advertise a complete
-third-party license audit until that review is complete.
+No model weights are included in the npm package or in a release. Users download
+them from their upstream sources under those assets' own licenses. The package
+contains no engine binary; the engine is downloaded from the GitHub release. Do not
+advertise a complete third-party license audit until the review is complete.

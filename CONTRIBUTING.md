@@ -1,0 +1,73 @@
+# Contributing
+
+```sh
+npm ci
+npm run check
+npm test
+npm run test:integration
+npm run engine:test
+npm run engine:fmt
+```
+
+See [README](README.md) for building the native engine and
+[release gates](docs/release-gates.md) for the acceptance matrix.
+
+## Versions
+
+One version is pinned in `package.json`, `package-lock.json`, `RUNTIME_VERSION` in
+`src/client/engine.ts`, the native workspace (`native/Cargo.toml`, `native/Cargo.lock`),
+and `assets/engines.json`. Change it everywhere at once with:
+
+```sh
+npm run version:set -- 0.2.0
+```
+
+A test fails when they disagree. Minor and major bumps are a deliberate version
+edit in a pull request; the release workflow only ever bumps the patch.
+
+## Releases
+
+Releases are manual: run the **Release** workflow (`release.yml`) from the Actions
+tab. It builds the engines for macOS arm64, Linux x64, and Windows x64, writes
+their size and SHA-256 into `assets/engines.json`, runs the checks, creates the
+GitHub release with the engines and `native/THIRD_PARTY.md`, verifies the uploaded
+assets against the manifest, publishes to npm, and only then publishes the
+release.
+
+**Version rule.** If the tag `v<version in package.json>` does not exist, that
+version is released as it is; otherwise the next patch is. The first run releases
+`0.1.0`, the next `0.1.1`.
+
+**Stable (run on `main`).** Commits `Release v<version>` (version files and
+`engines.json`), tags it, pushes `main` and the tag atomically, then releases to
+npm dist-tag `latest`.
+
+**Prerelease (run on a branch with an open pull request).** Releases
+`<next>-pr.<PR>.<run>` to npm dist-tag `pr` and as a GitHub prerelease. Only the
+tag is pushed, from a detached commit; the branch and `main` are untouched.
+Install it with `@mortz.prk/opencode-converse@<version>` in the plugin config.
+The workflow comments the version on the pull request.
+
+**Dry run.** Tick `dry_run` to build the engines, write the manifest, run the checks
+and `npm pack --dry-run`, and print what would be released. Nothing is pushed,
+released, or published. Use it before the one-time setup below is done.
+
+**Failure.** If a step after the draft release is created fails before `npm publish`,
+the draft is deleted (and, for prereleases, its tag). For a stable release the
+pushed commit and tag stay: either fix the cause and run again (the next patch is
+released), or delete the tag (`git push origin :refs/tags/v<version>`) and revert the
+`Release v<version>` commit. If npm publishing succeeded but publishing the draft
+release failed, publish the draft by hand.
+
+### One-time setup
+
+- Repository secret `RELEASE_PAT`: a fine-grained token for this repository with
+  **Contents: read and write**. It must be allowed to push to `main` (bypass branch
+  protection) because the release commit is pushed directly.
+- npm trusted publisher for `@mortz.prk/opencode-converse` (package settings →
+  Trusted publisher → GitHub Actions): owner `mortezaPRK`, repository
+  `opencode-converse`, workflow filename `release.yml`, no environment. No npm token
+  is stored. npm only allows configuring a trusted publisher on an existing package,
+  so publish a
+  placeholder version once by hand (for example `0.0.0` with `npm publish --access public
+  --tag placeholder`), configure the trusted publisher, then run the release.
