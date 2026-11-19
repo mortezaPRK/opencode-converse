@@ -17,6 +17,11 @@ enum Job {
         text: String,
         cancel: Arc<AtomicBool>,
     },
+    Ack {
+        epoch: u64,
+        index: usize,
+        cancel: Arc<AtomicBool>,
+    },
     Finish(u64),
 }
 #[derive(Default)]
@@ -32,6 +37,40 @@ struct Playback {
     chunks: Vec<(String, u64)>,
     chunk_bytes: usize,
     chunks_overflowed: bool,
+}
+
+/// Longest cached acknowledgement phrase. Three phrases of at most this length
+/// bound the cache to a few hundred KiB.
+const ACK_MAX_SECONDS: usize = 3;
+const ACK_TAIL_MS: usize = 250;
+
+fn ack_fits(samples: usize, rate: usize) -> bool {
+    samples > 0 && samples <= rate * ACK_MAX_SECONDS
+}
+
+/// Synthesize each acknowledgement phrase once, as the joined audio a normal
+/// chunk would produce.
+fn synthesize_acks(tts: &mut ve_tts::Tts) -> anyhow::Result<Vec<Vec<f32>>> {
+    let rate = tts.sample_rate() as usize;
+    let never = AtomicBool::new(false);
+    let mut cache = Vec::with_capacity(crate::controller::ACK_PHRASES.len());
+    for text in crate::controller::ACK_PHRASES {
+        let mut joiner = ve_tts::Joiner::new(tts.sample_rate());
+        let mut audio = Vec::new();
+        tts.synth_stream(text, &never, |part| {
+            audio.extend(joiner.push_part(part));
+            Ok(())
+        })?;
+        audio.extend(joiner.end_chunk(text));
+        // A sentence-length pause so a reply queued behind it is not run on.
+        audio.resize(audio.len() + rate * ACK_TAIL_MS / 1000, 0.0);
+        anyhow::ensure!(
+            ack_fits(audio.len(), rate),
+            "Acknowledgement audio is empty or exceeds its bound"
+        );
+        cache.push(audio);
+    }
+    Ok(cache)
 }
 
 const CHUNK_TEXT_LIMIT: usize = 64 * 1024;
@@ -347,6 +386,13 @@ impl Backend {
                     dir: models.tts.dir.clone(),
                 })?;
                 let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 48_000)?;
+                let acks = if settings.acknowledgement
+                    == Some(crate::protocol::AcknowledgementSetting::Off)
+                {
+                    Vec::new()
+                } else {
+                    synthesize_acks(&mut tts)?
+                };
                 let (capture_tx, capture_rx) = mpsc::sync_channel::<(u64, u64, Vec<f32>)>(64);
                 let (asr_tx, asr_rx) = mpsc::sync_channel::<AsrJob>(1);
                 let asr_events = events.clone();
@@ -638,6 +684,32 @@ impl Backend {
                             let tail = joiner.end_chunk(&text);
                             play(&resampler.process(&tail))?;
                         }
+                        Job::Ack {
+                            epoch,
+                            index,
+                            cancel,
+                        } => {
+                            let Some(cached) = acks.get(index) else {
+                                continue;
+                            };
+                            if cancel.load(Ordering::Acquire) {
+                                continue;
+                            }
+                            if new_speech_token(&mut last_speech, epoch, &cancel) {
+                                resampler.reset();
+                                joiner.reset();
+                            }
+                            let samples = resampler.process(cached);
+                            let mut state = state.lock().unwrap();
+                            if state.generation.allows(epoch, &cancel) {
+                                audio.push_output(&samples)?;
+                                // The acknowledgement is not part of the reply: keep it
+                                // out of played/generated progress and heard text.
+                                let ms = samples.len() as u64 * 1000 / 48_000;
+                                state.base.played_ms += ms;
+                                state.base.generated_ms += ms;
+                            }
+                        }
                         Job::Finish(epoch) => {
                             let finish_token = {
                                 let state = state.lock().unwrap();
@@ -761,6 +833,17 @@ impl Backend {
                     }
                 }
             }
+            Action::Ack(index) => {
+                let mut state = self.playback.lock().unwrap();
+                if let Some(cancel) = state.generation.token(epoch) {
+                    // Best effort: a full queue just means the reply is already speaking.
+                    let _ = self.jobs.try_send(Job::Ack {
+                        epoch,
+                        index,
+                        cancel,
+                    });
+                }
+            }
             Action::Finish => {
                 if self.jobs.try_send(Job::Finish(epoch)).is_err() {
                     self.pending_finish.store(epoch, Ordering::Release);
@@ -796,6 +879,14 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn acknowledgement_cache_is_bounded() {
+        assert!(!ack_fits(0, 24_000));
+        assert!(ack_fits(24_000 * ACK_MAX_SECONDS, 24_000));
+        assert!(!ack_fits(24_000 * ACK_MAX_SECONDS + 1, 24_000));
+        // Phrases x seconds x f32 at 24 kHz: well under a megabyte.
+        assert!(crate::controller::ACK_PHRASES.len() * ACK_MAX_SECONDS * 24_000 * 4 < 1 << 20);
+    }
     #[test]
     fn capture_ready_is_enqueued_before_a_synchronously_active_first_stream() {
         let (events, event_rx) = mpsc::sync_channel(4);

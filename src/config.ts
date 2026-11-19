@@ -15,6 +15,7 @@ export interface RuntimeConfig {
   readonly asrThreads?: number;
   readonly ttsThreads?: number;
   readonly endpointing?: Endpointing;
+  readonly acknowledgement?: Acknowledgement;
 }
 
 export const PLUGIN_OPTION_KEYS = [
@@ -24,9 +25,11 @@ export const PLUGIN_OPTION_KEYS = [
   "asrThreads",
   "ttsThreads",
   "endpointing",
+  "acknowledgement",
 ] as const;
 
 export type Endpointing = "responsive" | "patient";
+export type Acknowledgement = "auto" | "off";
 
 const MAX_THREADS = 256;
 
@@ -68,6 +71,13 @@ function endpointingOption(value: unknown): Endpointing | undefined {
   return value;
 }
 
+function acknowledgementOption(value: unknown): Acknowledgement | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value !== "auto" && value !== "off")
+    throw new Error('acknowledgement must be "auto" or "off"');
+  return value;
+}
+
 /** Structural parser shared by the server half and the local UI half. */
 export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const input = value === undefined || value === null ? {} : object(value);
@@ -75,10 +85,12 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const asrThreads = threadOption(input.asrThreads, "asrThreads");
   const ttsThreads = threadOption(input.ttsThreads, "ttsThreads");
   const endpointing = endpointingOption(input.endpointing);
+  const acknowledgement = acknowledgementOption(input.acknowledgement);
   return {
     ...(asrThreads === undefined ? {} : { asrThreads }),
     ...(ttsThreads === undefined ? {} : { ttsThreads }),
     ...(endpointing === undefined ? {} : { endpointing }),
+    ...(acknowledgement === undefined ? {} : { acknowledgement }),
   };
 }
 

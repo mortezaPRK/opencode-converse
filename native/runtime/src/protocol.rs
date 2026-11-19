@@ -19,6 +19,15 @@ pub struct Settings {
     pub tts_threads: Option<u16>,
     #[serde(default)]
     pub endpointing: Option<EndpointingSetting>,
+    #[serde(default)]
+    pub acknowledgement: Option<AcknowledgementSetting>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcknowledgementSetting {
+    Auto,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -217,7 +226,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient"}}"#,
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
@@ -225,6 +234,12 @@ mod tests {
             unreachable!()
         };
         assert_eq!(settings.endpointing, Some(EndpointingSetting::Patient));
+        assert_eq!(settings.acknowledgement, Some(AcknowledgementSetting::Off));
+        for bad in ["\"loud\"", "1", "true"] {
+            let value =
+                format!(r#"{{"type":"init","protocol":1,"settings":{{"acknowledgement":{bad}}}}}"#);
+            assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
+        }
         assert!(serde_json::from_str::<Host>(
             r#"{"type":"init","protocol":1,"settings":{"endpointing":"fast"}}"#
         )

@@ -120,6 +120,23 @@ turn as finished: `"responsive"` (default) checks after about 0.26 s of silence 
 stops waiting at 1.9 s; `"patient"` checks after about 0.64 s and stops waiting at
 3 s, which suits slower speech with longer pauses.
 
+`acknowledgement` (`"auto"` default, or `"off"`) controls a short spoken cue while
+the supervisor is still thinking. If no reply audio has started about 0.6 s after
+your spoken turn is sent, the engine says one neutral phrase ("Okay.", "On it.",
+"Let me check.", rotated). The phrases claim nothing about success, are
+synthesized once when the engine starts (so they play with no synthesis delay),
+and are spoken at most once per turn. They are skipped when the reply has already
+begun, for empty or rejected transcripts, after you interrupt or cancel, while
+output is paused or muted, and for worker announcements. If the reply starts while
+the cue is playing, the cue finishes and the reply follows it. The cue is never
+sent to the agent and is not added to the transcript. With `"off"` it is not
+synthesized at all. There is no environment override.
+
+Independently of this option, the first spoken chunk of each reply may end at the
+first clause boundary (comma, semicolon, colon, or dash) once it has at least four
+words, so speech can start before the first full sentence has arrived. Later chunks
+keep whole sentences.
+
 ## Barge-in
 
 While the assistant speaks, interrupting requires about 480 ms of clearly loud

@@ -205,6 +205,13 @@ impl FixtureSink {
                     }
                 }
             }
+            Action::Ack(index) => {
+                if let (Some(token), Some(text)) =
+                    (self.fence.token(epoch), controller::ACK_PHRASES.get(index))
+                {
+                    self.jobs.push_back((epoch, token, (*text).to_owned()));
+                }
+            }
             Action::Finish => self.finish = Some(epoch),
             Action::Mute(_) => {}
             Action::Pause(on) => self.paused = on,
@@ -385,6 +392,14 @@ fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
             return 1;
         }
         backend.tick(&tx);
+        let mut due = vec![];
+        controller.poll_ack(std::time::Instant::now(), &mut due);
+        for action in due {
+            if let Err(e) = backend.action(action, &tx) {
+                error("backend_error", e.to_string());
+                return 1;
+            }
+        }
         let input = match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(input) => input,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -409,6 +424,9 @@ fn run(mode: Mode, test_state_dir: Option<PathBuf>) -> i32 {
                     controller.hearing(1, &mut out, &mut actions);
                     controller.transcript(1, "Fixture prompt.".into(), &mut out, &mut actions);
                 } else if mode == Mode::Native {
+                    // Fixture modes never acknowledge: their output stays deterministic.
+                    controller.ack_enabled =
+                        settings.acknowledgement != Some(protocol::AcknowledgementSetting::Off);
                     #[cfg(feature = "native-audio")]
                     {
                         backend.audio = Some(audio::Backend::start(*settings, tx.clone()));

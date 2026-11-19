@@ -36,6 +36,11 @@
       "enum": ["responsive", "patient"],
       "default": "responsive",
       "description": "How long to wait in silence before treating your turn as finished. responsive: about 0.26 s before the end-of-turn check, 1.9 s hard stop. patient: about 0.64 s and 3 s, for slower or more thoughtful speech."
+    },
+    "acknowledgement": {
+      "enum": ["auto", "off"],
+      "default": "auto",
+      "description": "auto: if the reply has not started speaking about 0.6 s after your turn is sent, say one short neutral cue (\"Okay.\", \"On it.\", \"Let me check.\") that claims nothing. off: stay silent until the reply begins."
     }
   },
   "$defs": {
