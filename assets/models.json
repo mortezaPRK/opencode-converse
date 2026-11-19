@@ -4,7 +4,7 @@
   "roles": {
     "vad": "silero-vad",
     "turn": "smart-turn",
-    "asr": "whisper-base-en",
+    "asr": "moonshine-small-streaming-en",
     "tts": "phonon-31m-en"
   },
   "assets": [
@@ -31,14 +31,66 @@
       }
     },
     {
-      "id": "whisper-base-en",
-      "file": "ggml-base.en.bin",
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin",
-      "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
-      "bytes": 147964211,
-      "format": "file",
+      "id": "moonshine-small-streaming-en",
+      "format": "files",
+      "files": [
+        {
+          "path": "adapter.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/adapter.ort",
+          "sha256": "100d4806a3ba19b739fa9ae5c952e4d5267983090eea4a085e08d3e0bfd6875b",
+          "bytes": 2870320
+        },
+        {
+          "path": "cross_kv.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/cross_kv.ort",
+          "sha256": "aa0ed033b7065ef744c36dce00228c708b43f2f2410e8ec782a960105c8595f7",
+          "bytes": 5356496
+        },
+        {
+          "path": "decoder_kv.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/decoder_kv.ort",
+          "sha256": "e4fae3869851b861177b5e1619c77ec9262365b2747ec322298d11753e88b38d",
+          "bytes": 82043616
+        },
+        {
+          "path": "encoder.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/encoder.ort",
+          "sha256": "f61486dc7b017cee99196366dcc977a173f45f2f387b0b7977695d0f0565d234",
+          "bytes": 44148536
+        },
+        {
+          "path": "frontend.model.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/frontend.model.ort",
+          "sha256": "4a8d5ef7e99a5e3011dbf09ffac4176056587f2aec20f885d606b9f55fbed408",
+          "bytes": 26992
+        },
+        {
+          "path": "frontend.weights.ort",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/frontend.weights.ort",
+          "sha256": "5379f3dfebe849c6cbacf84f0aa7441956f9572efe1720d44aa267e7dff93056",
+          "bytes": 7769416
+        },
+        {
+          "path": "streaming_config.json",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/streaming_config.json",
+          "sha256": "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a",
+          "bytes": 512
+        },
+        {
+          "path": "tokenizer.bin",
+          "url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/tokenizer.bin",
+          "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d",
+          "bytes": 249974
+        },
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/moonshine-ai/moonshine/d8d8fa29d05ca67441a7719e70099f9f48917a93/LICENSE",
+          "sha256": "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f",
+          "bytes": 14180
+        }
+      ],
       "runtime": {
-        "path": "ggml-base.en.bin"
+        "path": "asr-moonshine-small-streaming-en"
       }
     },
     {

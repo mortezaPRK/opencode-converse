@@ -2005,7 +2005,7 @@ test("stopping during server start cleans up the late session without spawning r
 });
 
 test("server-returned inference tuning reaches the local runtime", async () => {
-  const runtime = { asrThreads: 2, ttsThreads: 3, useGpu: false };
+  const runtime = { asrThreads: 2, ttsThreads: 3 };
   const s = setup({ start: async () => ({ sessionID: "session", runtime }) });
   await s.bridge.start();
   assert.deepEqual(s.runtimeOptions().runtime, runtime);

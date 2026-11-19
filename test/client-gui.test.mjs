@@ -195,9 +195,9 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
 });
 
 test("GUI passes inference tuning and rejects invalid values", async () => {
-  const s = setup({ options: { asrThreads: 2, useGpu: false } });
+  const s = setup({ options: { asrThreads: 2 } });
   await s.api.start({ serverID: "remote", directory: "/chosen" }, s.caller(1));
-  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2, useGpu: false });
+  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2 });
   await s.cleanup();
 
   const invalid = setup({ options: { asrThreads: 0 } });

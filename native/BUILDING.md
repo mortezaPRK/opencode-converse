@@ -15,9 +15,10 @@ native/target/release/opencode-converse models install
 native/target/release/opencode-converse doctor
 ```
 
-On Windows the executable has an `.exe` suffix. Building needs Rust, CMake,
-C/C++, and libclang. Linux additionally needs ALSA development headers and
-pkg-config. macOS uses Whisper Metal; other targets use CPU Whisper. macOS has
+On Windows the executable has an `.exe` suffix. Building needs Rust and a C/C++
+toolchain. Linux additionally needs ALSA development headers and
+pkg-config. Speech recognition (Moonshine) and the VAD/turn models run on CPU through the
+shared ONNX Runtime on every platform. macOS has
 a minimum deployment target of 13.4 for the downloaded ONNX Runtime archive.
 
 ## Offline speech listening comparison
@@ -47,6 +48,22 @@ breaks. Ambiguous acronym-final sentences may stay together until another clear
 boundary or finalization. This larger context can delay the first chunk of a
 long, unpunctuated streamed reply; model and playback queue limits remain intact.
 
+## Offline ASR comparison
+
+`asr_quality` measures speech recognition on identical audio, with no devices. `synth`
+renders fixed coding-vocabulary utterances through Phonon once (16 kHz mono f32 files plus
+`refs.txt` in a new directory); `run` transcribes those files and prints per-utterance
+text, word errors, latency, load time, and RSS, plus silence/low-noise rejection checks.
+Phonon sampling is stochastic, so compare ASR builds on the same `synth` directory:
+
+```sh
+cargo run --release --manifest-path native/Cargo.toml --locked -p opencode-converse --features native-audio --example asr_quality -- synth /absolute/path/to/new-directory
+cargo run --release --manifest-path native/Cargo.toml --locked -p opencode-converse --features native-audio --example asr_quality -- run /absolute/path/to/new-directory
+```
+
+References are the written text, so spoken forms such as "zero point three" or "dot ts"
+count as errors for engines that normalize to "0.3" or ".ts". Use for relative comparison.
+
 ## Native linking constraints
 
 - Text-to-speech uses the pure-Rust `ptts` crate (Gradium Phonon 31M, CPU, q8
@@ -58,7 +75,7 @@ long, unpunctuated streamed reply; model and playback queue limits remain intact
   the artifact root through Cargo metadata, including `target-dir` configuration.
   For target-specific helper builds, set that variable explicitly, including when
   Cargo config already sets `build.target`.
-- The ONNX model crates explicitly use ORT API 17. Changing API/optimization
+- The ONNX model crates (VAD, turn, and Moonshine ASR) explicitly use ORT API 17. Changing API/optimization
   behavior can alter Smart Turn decisions. They statically link their ORT
   archive.
 - The macOS static ORT archive's CoreML objects require Apple's compiler-rt

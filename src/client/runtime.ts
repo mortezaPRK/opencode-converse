@@ -59,7 +59,6 @@ export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings
   return {
     ...(config.asrThreads === undefined ? {} : { asrThreads: config.asrThreads }),
     ...(config.ttsThreads === undefined ? {} : { ttsThreads: config.ttsThreads }),
-    ...(config.useGpu === undefined ? {} : { useGpu: config.useGpu }),
     ...(config.endpointing === undefined ? {} : { endpointing: config.endpointing }),
   };
 }

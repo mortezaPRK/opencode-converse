@@ -482,10 +482,10 @@ fn doctor() -> i32 {
     let models_ok = match paths::check_models() {
         Ok(models) => {
             eprintln!(
-                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR: {}\n  TTS (Phonon) directory: {}",
+                "Required model files are present (integrity/inference not verified):\n  VAD: {}\n  Turn: {}\n  ASR (Moonshine) directory: {}\n  TTS (Phonon) directory: {}",
                 models.vad.display(),
                 models.turn.display(),
-                models.asr.display(),
+                models.asr.dir.display(),
                 models.tts.dir.display(),
             );
             true

@@ -260,9 +260,9 @@ test("TUI disposal keeps unknown native termination as a reported cleanup failur
 });
 
 test("TUI hands configured inference tuning to the bridge", async () => {
-  const s = setup({ options: { asrThreads: 2, useGpu: false } });
+  const s = setup({ options: { asrThreads: 2 } });
   await s.run("start");
-  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2, useGpu: false });
+  assert.deepEqual(s.bridges[0].options.runtimeConfig, { asrThreads: 2 });
   assert.equal(
     `${s.bridges[0].options.packageRoot}/`,
     fileURLToPath(new URL("../", import.meta.url)),

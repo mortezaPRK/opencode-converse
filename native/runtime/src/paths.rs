@@ -8,8 +8,8 @@ static TEST_STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub const DEFAULT_ASR_THREADS: u16 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TtsPaths {
-    /// Phonon checkpoint directory: config, tokenizer, q8 weights, default voice, license.
+pub struct ModelDir {
+    /// Installed directory of one multi-file model (Moonshine ASR, Phonon TTS).
     pub dir: PathBuf,
     /// Every pinned member the loader and the license notice need, as absolute paths.
     pub files: Vec<PathBuf>,
@@ -19,8 +19,8 @@ pub struct TtsPaths {
 pub struct ModelPaths {
     pub vad: PathBuf,
     pub turn: PathBuf,
-    pub asr: PathBuf,
-    pub tts: TtsPaths,
+    pub asr: ModelDir,
+    pub tts: ModelDir,
 }
 
 fn absolute_base(value: std::ffi::OsString, name: &str) -> anyhow::Result<PathBuf> {
@@ -159,6 +159,18 @@ pub fn models_dir() -> anyhow::Result<PathBuf> {
     Ok(state_dir()?.join("models"))
 }
 
+fn model_dir(models: &Path, asset: &inventory::Asset) -> ModelDir {
+    let dir = models.join(asset.runtime_path());
+    ModelDir {
+        files: asset
+            .files
+            .iter()
+            .map(|file| dir.join(&file.path))
+            .collect(),
+        dir,
+    }
+}
+
 pub fn resolve_models() -> anyhow::Result<ModelPaths> {
     let models = models_dir()?;
     let inventory = inventory::Inventory::load()?;
@@ -169,15 +181,8 @@ pub fn resolve_models() -> anyhow::Result<ModelPaths> {
     Ok(ModelPaths {
         vad: models.join(vad.runtime_path()),
         turn: models.join(turn.runtime_path()),
-        asr: models.join(asr.runtime_path()),
-        tts: TtsPaths {
-            dir: models.join(tts.runtime_path()),
-            files: tts
-                .files
-                .iter()
-                .map(|file| models.join(tts.runtime_path()).join(&file.path))
-                .collect(),
-        },
+        asr: model_dir(&models, asr),
+        tts: model_dir(&models, tts),
     })
 }
 
@@ -185,13 +190,10 @@ pub fn check_models() -> anyhow::Result<ModelPaths> {
     let paths = resolve_models()?;
     let models = models_dir()?;
     let mut missing = vec![];
-    for (name, path) in [
-        ("vad", &paths.vad),
-        ("turn", &paths.turn),
-        ("asr", &paths.asr),
-    ]
-    .into_iter()
-    .chain(paths.tts.files.iter().map(|path| ("tts file", path)))
+    for (name, path) in [("vad", &paths.vad), ("turn", &paths.turn)]
+        .into_iter()
+        .chain(paths.asr.files.iter().map(|path| ("asr file", path)))
+        .chain(paths.tts.files.iter().map(|path| ("tts file", path)))
     {
         if !path.is_file() {
             missing.push(format!("{name}: {}", path.display()));
@@ -270,7 +272,14 @@ mod tests {
         let tts = inventory.role_asset("tts").unwrap();
         assert_eq!(defaults.vad, models.join(vad.runtime_path()));
         assert_eq!(defaults.turn, models.join(turn.runtime_path()));
-        assert_eq!(defaults.asr, models.join(asr.runtime_path()));
+        assert_eq!(defaults.asr.dir, models.join(asr.runtime_path()));
+        assert_eq!(defaults.asr.files.len(), asr.files.len());
+        #[cfg(feature = "native-audio")]
+        {
+            for file in ve_asr::MODEL_FILES {
+                assert!(asr.files.iter().any(|member| member.path == file));
+            }
+        }
         assert_eq!(defaults.tts.dir, models.join(tts.runtime_path()));
         assert_eq!(defaults.tts.files.len(), tts.files.len());
         assert!(defaults

@@ -138,7 +138,6 @@ pub fn test_only_inference() -> anyhow::Result<()> {
     let settings = crate::protocol::Settings::default();
     let _lock = crate::paths::lock()?;
     let models = crate::paths::check_models()?;
-    ve_asr::silence_logs();
     let mut vad = ve_vad::SileroVad::from_model(&models.vad)?;
     anyhow::ensure!(
         vad.prob(&[0.0; 512])?.is_finite(),
@@ -160,19 +159,18 @@ pub fn test_only_inference() -> anyhow::Result<()> {
     let mut resampler = ve_audio::StreamResampler::new(tts.sample_rate(), 16_000)?;
     let mut samples = resampler.process(&samples);
     samples.extend(resampler.flush());
-    let mut asr = ve_asr::WhisperAsr::from_config(ve_asr::AsrConfig {
-        model_path: models.asr.clone(),
+    let mut asr = ve_asr::Asr::from_config(ve_asr::AsrConfig {
+        model_dir: models.asr.dir.clone(),
         n_threads: settings
             .asr_threads
-            .unwrap_or(crate::paths::DEFAULT_ASR_THREADS) as i32,
-        use_gpu: settings.use_gpu.unwrap_or(cfg!(target_os = "macos")),
+            .unwrap_or(crate::paths::DEFAULT_ASR_THREADS) as usize,
     })?;
     let recognized = asr.transcribe(&samples)?;
     anyhow::ensure!(
         !recognized.rejected && !recognized.text.trim().is_empty(),
-        "Whisper rejected synthesized test speech"
+        "Moonshine rejected synthesized test speech"
     );
-    eprintln!("Test-only headless VAD/turn/Phonon/resampling/Whisper inference passed. No device capture/playback was tested.");
+    eprintln!("Test-only headless VAD/turn/Phonon/resampling/Moonshine inference passed. No device capture/playback was tested.");
     Ok(())
 }
 
@@ -333,19 +331,17 @@ impl Backend {
             let _health_guard = WorkerHealth(thread_health.clone());
             let result = (|| -> anyhow::Result<()> {
                 let models = crate::paths::check_models()?;
-                ve_asr::silence_logs();
                 let mut detector = turn::TurnDetector::new(
                     &models.vad,
                     &models.turn,
                     endpointing(settings.endpointing),
                 )?;
-                let mut asr = ve_asr::WhisperAsr::from_config(ve_asr::AsrConfig {
-                    model_path: models.asr.clone(),
+                let mut asr = ve_asr::Asr::from_config(ve_asr::AsrConfig {
+                    model_dir: models.asr.dir.clone(),
                     n_threads: settings
                         .asr_threads
                         .unwrap_or(crate::paths::DEFAULT_ASR_THREADS)
-                        as i32,
-                    use_gpu: settings.use_gpu.unwrap_or(cfg!(target_os = "macos")),
+                        as usize,
                 })?;
                 let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
                     dir: models.tts.dir.clone(),
@@ -553,7 +549,7 @@ impl Backend {
                                         )?;
                                     }
                                     turn::TurnEvent::Utterance { audio, .. } => {
-                                        // Never block VAD/barge-in on Whisper or a full ASR
+                                        // Never block VAD/barge-in on Moonshine or a full ASR
                                         // queue. Superseded/dropped utterances are abandoned.
                                         submit_utterance(
                                             &mut open_hearing,

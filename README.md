@@ -60,7 +60,8 @@ operations:
 
 Model URLs, sizes, and SHA-256 digests are recorded in
 [`assets/models.json`](assets/models.json). The same file defines the VAD, turn,
-ASR, and TTS roles and their runtime paths. TTS is Gradium Phonon 31M (Apache-2.0
+ASR, and TTS roles and their runtime paths. ASR is Moonshine v2 Small Streaming
+(123M, English, MIT; run on ONNX Runtime). TTS is Gradium Phonon 31M (Apache-2.0
 weights; see `THIRD_PARTY.md`). No weights are shipped in the npm package. Review the asset terms before downloading or redistributing them.
 Models stay in `<state>/models`, so they are reused when the engine version
 changes.
@@ -151,7 +152,7 @@ The engine and speech-model locations are fixed under the app state folder.
 There is no engine, data, or model path option and no `CONVERSE_BIN` override.
 The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
-versions. `asrThreads`, `ttsThreads`, and `useGpu` are the only runtime tuning
+versions. `asrThreads`, `ttsThreads`, and `endpointing` are the only runtime tuning
 options. OpenCode owns provider credentials; they are never passed to the Rust
 process. Device preferences stay in host storage.
 

@@ -27,3 +27,7 @@ ve-tts = { path = "../crates/ve-tts", optional = true }
 [[example]]
 name = "speech_quality"
 required-features = ["native-audio"]
+
+[[example]]
+name = "asr_quality"
+required-features = ["native-audio"]

@@ -97,7 +97,10 @@ inventory roles. There are no per-model path options. The TTS role is the Phonon
 31M English checkpoint, a directory of individually pinned files (URL, SHA-256, and
 byte count each) installed atomically under `<state>/models/tts-phonon-31m-en`.
 Its weights, tokenizer, and default voice are Apache-2.0; see
-[`THIRD_PARTY.md`](../THIRD_PARTY.md).
+[`THIRD_PARTY.md`](../THIRD_PARTY.md). The ASR role is Moonshine v2 Small Streaming
+(English, MIT), also a pinned directory installed under
+`<state>/models/asr-moonshine-small-streaming-en` and loaded by the engine's own
+ONNX Runtime code.
 
 Install the pinned defaults with the engine installed in the state folder:
 
@@ -108,8 +111,8 @@ Install the pinned defaults with the engine installed in the state folder:
 
 ## Inference tuning
 
-`asrThreads` and `ttsThreads` are bounded to 1–256. `useGpu` defaults to true on
-macOS and false elsewhere. Phonon (`ptts`) chooses its own CPU threading, so
+`asrThreads` and `ttsThreads` are bounded to 1–256. Speech recognition (Moonshine)
+and the VAD/turn models run on the CPU; there is no GPU option. Phonon (`ptts`) chooses its own CPU threading, so
 `ttsThreads` is currently accepted but has no effect.
 
 `endpointing` controls how long the engine waits in silence before it treats your

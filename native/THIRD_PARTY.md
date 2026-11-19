@@ -48,21 +48,12 @@ methods and documents regeneration. Fixtures use little-endian f32, mel-major
 
 The source setup uses these components, among others:
 
-- **whisper-rs 0.16.0** (Rust binding): **Unlicense**, not MIT. Its resolved
-  manifest declares `Unlicense` and its shipped `LICENSE` contains The Unlicense.
-  The crate archive SHA-256 is
-  `2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6`.
-- **whisper-rs-sys 0.15.0** (FFI binding): its manifest also declares
-  **Unlicense**. Both binding archives record upstream revision
-  `7558e1b72f54f2f22a53589afb77e65681834c36` in `.cargo_vcs_info.json`;
-  the [license at that revision](https://codeberg.org/tazz4843/whisper-rs/src/commit/7558e1b72f54f2f22a53589afb77e65681834c36/LICENSE)
-  was verified separately. The sys archive SHA-256 is
-  `6986c0fe081241d391f09b9a071fbcbb59720c3563628c3c829057cf69f2a56f`.
-- **whisper.cpp / bundled GGML source**: separate MIT notice in the resolved
-  sys archive's `whisper.cpp/LICENSE`, Copyright (c) 2023-2024 The ggml authors.
-  Retain that notice independently of the binding's Unlicense. Archive hashes
-  above match `Cargo.lock`; they identify the reviewed source artifacts, not
-  clearance of every resulting native binary or bundled component.
+- **Moonshine v2 Small Streaming runtime**: implemented in `crates/ve-asr` directly
+  against ONNX Runtime following the inference procedure in the MIT-licensed
+  `moonshine-ai/moonshine` C++ sources (`core/moonshine-streaming-model.cpp`,
+  `core/bin-tokenizer`); the greedy-decode length heuristic (6.5 tokens/s) and the
+  `tokenizer.bin` layout come from there. No Moonshine source is copied or linked.
+  Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI), MIT.
 - ONNX Runtime: MIT.
 - **ptts 0.7.1** (Gradium Phonon runtime, `github.com/gradium-ai/xn-ptts`):
   **MIT OR Apache-2.0** per its crates.io manifest. Built with only the `hf`
@@ -75,7 +66,12 @@ Models are downloaded separately, never included in the npm source package:
 
 - Silero VAD: upstream MIT notices.
 - Smart Turn v3: upstream BSD-2-Clause notices.
-- Whisper: upstream MIT notices.
+- Moonshine v2 Small Streaming English (`quantized_26_11_02` `.ort` files from
+  `download.moonshine.ai`, hashes pinned in `assets/models.json`): **MIT** per the
+  upstream repository `LICENSE` (pinned `d8d8fa29d05ca67441a7719e70099f9f48917a93`,
+  installed beside the weights) and the `moonshine-ai/moonshine-streaming-small`
+  model card. Non-English legacy Moonshine models are non-commercial and are not
+  used. Confirm the grant for the exact converted artifacts before redistribution.
 - Phonon 31M English (`gradium/phonon-31m-en`, pinned commit in
   `assets/models.json`): weights, tokenizer, and the default voice are
   **Apache-2.0** per the model card and the `LICENSE` file installed with them.
