@@ -102,6 +102,7 @@ function setup({ stop, start, fixture, options } = {}) {
         serverID: options.target.serverID,
         sessionID: "supervisor",
         interrupted: null,
+        transcript: [],
       };
       const bridge = {
         options,
@@ -123,6 +124,10 @@ function setup({ stop, start, fixture, options } = {}) {
         },
         mute() {
           bridge.muted++;
+        },
+        attached: [],
+        async attach(sessionID) {
+          bridge.attached.push(sessionID);
         },
         pause(paused) {
           bridge.paused.push(paused);
@@ -180,6 +185,7 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
     serverID: "remote",
     sessionID: "supervisor",
     interrupted: null,
+    transcript: [],
   });
   await s.api.stop(undefined, s.caller(1));
   await s.api.start({ serverID: "sidecar", directory: "/local" }, s.caller(2));
@@ -495,8 +501,15 @@ test("GUI disposal ignores intentional startup cancellation and queued pre-start
 
 // The window setup only renders through the host, so the test records what it
 // contributes and asks the same reactive thunks the host would read.
-function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
-  const state = { status, paused: false, sessionID };
+function statusSetup({
+  status = "off",
+  sessionID = "supervisor",
+  current = { id: "supervisor", server: { id: "remote" } },
+} = {}) {
+  const state = { status, paused: false, sessionID, serverID: sessionID ? "remote" : null };
+  const attached = [];
+  const starts = [];
+  const toasts = [];
   let titlebar;
   let pill;
   let listener;
@@ -504,12 +517,12 @@ function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
   const pauses = [];
   const panels = [];
   const commands = new Map();
-  const session = { id: "supervisor", server: { id: "remote" } };
+  const session = current;
   const ctx = {
     id: "converse",
     signal: new AbortController().signal,
     app: { platform: "desktop" },
-    toast: { show: () => {} },
+    toast: { show: (value) => toasts.push(value) },
     sessions: { current: () => session, list: () => [session] },
     screen: { current: () => undefined },
     tabs: { open: () => true },
@@ -528,7 +541,14 @@ function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
     },
     main: () => ({
       state: () => ({ ...state }),
-      start: async () => {},
+      start: async (input) => {
+        starts.push(input);
+        state.sessionID = "supervisor";
+        state.serverID = input.serverID;
+      },
+      attach: async (input) => {
+        attached.push(input.sessionID);
+      },
       stop: async () => {},
       mute: async () => {},
       pause: async (input) => {
@@ -546,6 +566,9 @@ function statusSetup({ status = "off", sessionID = "supervisor" } = {}) {
   const cleanup = gui.setup(ctx);
   return {
     state,
+    attached,
+    starts,
+    toasts,
     pauses,
     panels,
     panel,
@@ -661,4 +684,64 @@ test("GUI error chip expires after the presence window", (t) => {
   t.mock.timers.tick(PRESENCE_ERROR_MS);
   assert.equal(s.item().label, "Converse: Idle", "the chip lapses back to the engine state");
   s.cleanup();
+});
+
+test("GUI state carries the bridge transcript through the main-owned Ipc", async () => {
+  const s = setup();
+  await s.api.start({ serverID: "remote", directory: "/chosen" }, s.caller(1));
+  assert.deepEqual(s.api.state(1).transcript, []);
+  assert.equal(Array.isArray(s.api.state(1).transcript), true);
+  const { ConverseDesktop } = await import("../dist/gui/contract.js");
+  const { Schema } = await import("effect");
+  const decode = Schema.decodeUnknownSync(ConverseDesktop.spec.state);
+  const next = {
+    ...s.api.state(1),
+    transcript: [
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "hi" },
+    ],
+  };
+  assert.deepEqual(decode(next).transcript, next.transcript);
+  assert.throws(() => decode({ ...next, transcript: [{ role: "tool", text: "x" }] }));
+  await s.cleanup();
+});
+
+test("GUI attach is routed to the owning window's bridge and needs a running conversation", async () => {
+  const s = setup();
+  await assert.rejects(s.api.attach({ sessionID: "open" }, s.caller(1)), /Start Converse/);
+  await s.api.start({ serverID: "remote", directory: "/chosen" }, s.caller(1));
+  await assert.rejects(s.api.attach({ sessionID: "open" }, s.caller(2)), /owned by another window/);
+  await s.api.attach({ sessionID: "open" }, s.caller(1));
+  assert.deepEqual(s.bridges[0].attached, ["open"]);
+  await s.cleanup();
+});
+
+test("GUI talk-to-this-session attaches the viewed session and never retargets a running conversation", async () => {
+  const viewed = { id: "viewed", server: { id: "remote" }, directory: "/chosen" };
+  const running = statusSetup({ status: "listening", current: viewed });
+  await running.command("attach").run();
+  assert.deepEqual(running.attached, ["viewed"]);
+  assert.deepEqual(running.starts, []);
+  running.cleanup();
+
+  const idle = statusSetup({ sessionID: null, current: viewed });
+  await idle.command("attach").run();
+  assert.deepEqual(idle.starts, [{ serverID: "remote", directory: "/chosen" }]);
+  assert.deepEqual(idle.attached, ["viewed"]);
+  idle.cleanup();
+
+  const elsewhere = statusSetup({
+    status: "listening",
+    current: { id: "viewed", server: { id: "other" }, directory: "/chosen" },
+  });
+  await elsewhere.command("attach").run();
+  assert.deepEqual(elsewhere.attached, []);
+  assert.match(elsewhere.toasts.at(-1).description, /Stop Converse/);
+  elsewhere.cleanup();
+
+  const self = statusSetup({ status: "listening" });
+  await self.command("attach").run();
+  assert.deepEqual(self.attached, []);
+  assert.match(self.toasts.at(-1).description, /supervisor session/);
+  self.cleanup();
 });

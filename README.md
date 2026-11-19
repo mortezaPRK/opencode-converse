@@ -105,6 +105,7 @@ from the command palette or run `/converse-start`.
 | `/converse-stop`    | Stop and release the local runtime                    |
 | `/converse-mute`    | Mute or unmute microphone capture                     |
 | `/converse-pause`   | Pause or resume spoken output                         |
+| `/converse-attach`  | Talk to the session you are viewing (starts if idle)  |
 | `/converse-open`    | Open the dedicated supervisor session                 |
 | `/converse-details` | Show the live transcript, activity, and controls      |
 
@@ -120,8 +121,19 @@ discards the held speech. If you cut a reply off, the transcript marks it
 unchanged). `endpointing` (`responsive` or `patient`) tunes how long the engine
 waits in silence before ending your turn; see [configuration](docs/configuration.md).
 
+The transcript (latest 50 entries) is kept by the voice bridge, not read from the
+host's session cache, so it shows your spoken prompts and the supervisor's
+completed replies even while you are viewing another session.
+
 Ask the supervisor to delegate a task, inspect one of its workers, steer it, or
-stop it. It reports worker updates while you are listening. Worker permission
+stop it. Say "start a plan session about X" to pick any visible OpenCode agent
+(`converse_list_agents`); without one, the hidden `converse-worker` is used.
+To work in an existing session, run `/converse-attach` while viewing it, or ask
+the supervisor to attach one from `converse_list_sessions`. Only sessions at the
+conversation's own location can be attached, never supervisor sessions or
+sessions held by another active conversation; attaching sends nothing, and
+agent changes apply only when you ask for them. Attached sessions are prompted,
+followed, and announced like any worker, and permission requests stay on screen. It reports worker updates while you are listening. Worker permission
 requests must be decided on screen. If a server connection drops, start a new
 conversation explicitly; user prompts are not automatically replayed.
 Long replies are shortened for speech; the full response remains available in
@@ -147,8 +159,9 @@ Each conversation keeps its original server and workspace target. Changing tabs
 does not redirect a running conversation. Stop and start to select another target.
 Use a consistent workspace path: OpenCode treats symlink and other path spellings
 as separate locations. Delegation can reach known saved projects and worktrees
-across the selected server, not only the active project. Workers always use the
-hidden `converse-worker` agent and its normal OpenCode permission rules.
+across the selected server, not only the active project. Workers use the hidden
+`converse-worker` agent unless you name another visible agent, and keep normal
+OpenCode permission rules.
 
 ## Verify
 

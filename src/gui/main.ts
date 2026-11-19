@@ -17,6 +17,7 @@ export function createMain(
       serverID: null,
       sessionID: null,
       interrupted: null,
+      transcript: [],
     };
     let owner: number | undefined;
     let bridge: ReturnType<typeof createBridge> | undefined;
@@ -147,6 +148,13 @@ export function createMain(
             checkOwner(caller.window);
             await stop();
           }
+        });
+      },
+      attach(input, caller) {
+        return serialize(async () => {
+          checkOwner(caller.window);
+          if (!bridge) throw new Error("Start Converse before attaching a session");
+          await bridge.attach(input.sessionID);
         });
       },
       mute(_input, caller) {

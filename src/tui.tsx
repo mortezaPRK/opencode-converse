@@ -22,6 +22,7 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         sessionID: null,
         interrupted: null,
         serverID: null,
+        transcript: [],
       });
       // A failed turn or start leaves the engine idle, so the error outlives the
       // status change but never the conversation: it lapses on its own timer.
@@ -113,6 +114,15 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         const sessionID = state().sessionID;
         if (sessionID) ctx.ui.router.navigate({ type: "session", sessionID });
       };
+      // Start the conversation if needed, then point it at the session on screen.
+      const attachCurrent = async () => {
+        const route = ctx.ui.router.current();
+        if (route.type !== "session") throw new Error("Open a session to talk to it");
+        if (route.sessionID === state().sessionID)
+          throw new Error("This is the Converse supervisor session");
+        if (!bridge || state().status === "off") await start();
+        await bridge?.attach(route.sessionID);
+      };
       const view = () => presence(state().status, failure());
       const toneColor = (tone: PresenceTone) => {
         if (tone === "success") return ctx.theme.text.feedback.success.base;
@@ -181,6 +191,7 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         { id: "start", title: "start conversation", run: () => attempt(start) },
         { id: "stop", title: "stop conversation", run: () => attempt(stop) },
         { id: "mute", title: "mute/unmute microphone", run: () => attempt(() => bridge?.mute()) },
+        { id: "attach", title: "talk to this session", run: () => attempt(attachCurrent) },
         { id: "open", title: "open supervisor session", run: open },
         {
           id: "status",

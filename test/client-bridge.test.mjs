@@ -105,6 +105,9 @@ function setup({
           calls.push(["stop", ...args]);
           return stop?.(...args);
         },
+        attach: async (...args) => {
+          calls.push(["attach", ...args]);
+        },
       };
     },
     event: {
@@ -1808,6 +1811,7 @@ test("bridge snapshots authenticated client and location; runtime receives no en
     status: "loading",
     paused: false,
     interrupted: null,
+    transcript: [],
   });
   await begin(s);
   assert.deepEqual(s.calls.find(([type]) => type === "prompt")[1], {
@@ -2006,4 +2010,68 @@ test("server-returned inference tuning reaches the local runtime", async () => {
   await s.bridge.start();
   assert.deepEqual(s.runtimeOptions().runtime, runtime);
   await s.bridge.stop();
+});
+
+test("snapshot carries a bounded live transcript of prompts, replies and worker updates", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  assert.deepEqual(s.bridge.snapshot().transcript, [{ role: "user", text: "hello" }]);
+  s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "Hi there" });
+  await tick();
+  assert.deepEqual(s.bridge.snapshot().transcript, [
+    { role: "user", text: "hello" },
+    { role: "assistant", text: "Hi there" },
+  ]);
+  assert.deepEqual(s.snapshots.at(-1).transcript.at(-1), { role: "assistant", text: "Hi there" });
+  const published = s.snapshots.at(-1).transcript;
+  published.push({ role: "user", text: "tamper" });
+  assert.equal(s.bridge.snapshot().transcript.length, 2, "published snapshots are copies");
+  s.emit("session.execution.succeeded", {});
+  await tick();
+  background(s, "update-1");
+  s.emit("session.text.ended", {
+    assistantMessageID: "update-1",
+    ordinal: 0,
+    text: "Worker finished",
+  });
+  await tick();
+  assert.deepEqual(s.bridge.snapshot().transcript.at(-1), {
+    role: "assistant",
+    text: "Worker finished",
+  });
+  await s.bridge.stop();
+});
+
+test("transcript rolls at its entry and text limits", async () => {
+  const s = setup();
+  await s.bridge.start();
+  for (let turn = 1; turn <= 60; turn++) {
+    s.engine({ type: "prompt", turn, text: turn === 60 ? "é".repeat(5000) : `turn ${turn}` });
+    await tick();
+    s.emit("session.execution.started", {});
+    s.emit("session.inbox.delivered", { inboxID: `inbox-${turn}` });
+    s.emit("session.step.started", { assistantMessageID: `assistant-${turn}` });
+    s.emit("session.execution.succeeded", {});
+    await tick();
+  }
+  const { transcript } = s.bridge.snapshot();
+  assert.equal(transcript.length, 50);
+  assert.equal(transcript[0].text, "turn 11");
+  const last = transcript.at(-1).text;
+  assert.ok(Buffer.byteLength(last) <= 2003);
+  assert.ok(last.endsWith("…"));
+  await s.bridge.stop();
+});
+
+test("attach targets this conversation's supervisor at its selected location", async () => {
+  const s = setup();
+  await assert.rejects(s.bridge.attach("existing"), /not running/);
+  await s.bridge.start();
+  await s.bridge.attach("existing");
+  const call = s.calls.find(([type]) => type === "attach");
+  assert.deepEqual(call[1], { supervisorID: "session", sessionID: "existing" });
+  assert.deepEqual(call[2].location, { directory: "/chosen" });
+  await s.bridge.stop();
+  await assert.rejects(s.bridge.attach("existing"), /not running/);
 });
