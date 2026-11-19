@@ -1,9 +1,9 @@
 # Speech and audio stack research — November 2026
 
-Status: **research, partly implemented** as of 19 November 2026 (engine 0.4.0). The original document of
+Status: **research, partly implemented** as of 19 November 2026 (engine 0.5.0). The original document of
 18 November 2026 was research only. Since then: Piper/sherpa-onnx was replaced by Gradium Phonon 31M (`ptts`); Whisper `base.en` was replaced by Moonshine v2 Small Streaming (§6.4, phase one);
 played/generated sample accounting reports what was actually heard on interrupt; `endpointing: responsive|patient`
-was added; spoken output can be paused; engine 0.4.0 adds a cached neutral acknowledgement (§5.4/§6, `acknowledgement: auto|off`) and an earlier first chunk (clause cut after ≥4 words); Silero VAD was already v6.2. Sections describing Piper are the
+was added; spoken output can be paused; engine 0.4.0 adds a cached neutral acknowledgement (§5.4/§6, `acknowledgement: auto|off`) and an earlier first chunk (clause cut after ≥4 words); Silero VAD was already v6.2; engine 0.5.0 adds WebRTC AEC3 echo cancellation (§4.4/§6.3, `echoCancellation: on|off`) with a relaxed barge-in guard. Sections describing Piper are the
 pre-change baseline. The document exists to make future changes cheap to justify and easy to
 reject.
 
@@ -503,6 +503,22 @@ Recommended sequencing: `webrtc-audio-processing` AEC3 first (cross-platform, ke
 `cpal`, reuses the exact render signal), with the Apple voice-processing graph kept as a
 macOS-specific follow-up if CPU or quality disappoints. Feed it the post-gain, post-
 resampling, post-truncation PCM; align by timestamp; keep the filter warm across barge-ins.
+
+> **Status (19 November 2026): implemented in engine 0.5.0, offline-verified only.**
+> `webrtc-audio-processing` 2.1.0 (bundled build; needs meson + ninja) runs AEC3 at
+> 16 kHz on the capture worker thread, referenced by the exact mono samples the output
+> callback played, tapped through a bounded `rtrb` ring and resampled/aligned to the
+> capture time axis (zero-padded when starved with skip-on-arrival, trimmed beyond
+> 100 ms). AEC3's own delay estimator is used; no cpal timestamps. The barge-in guard
+> is 4 frames at p > 0.7 with AEC on (was 15 at 0.85), pre-roll 8 frames. The
+> `aec_quality` example (simulated 30-200 ms echo paths, 180/450 ms reverb tails, speaker
+> clipping, Phonon as assistant, `say` as user) measured ERLE 32-46 dB, no Silero
+> speech frame above 0.7 in echo-only audio after AEC (469 of 599 frames above 0.5
+> before), no false starts, and detection +128-160 ms after the user's first voiced
+> frame with an exact ASR transcript during double talk. It does not cover real rooms,
+> device clock drift, or latency jitter: the echo/self-trigger release gate stays open.
+> Apple voice processing was not pursued (it would replace cpal on macOS and lose
+> Linux/Windows parity).
 
 ### 6.4 On ASR, be deliberately two-phase
 

@@ -108,6 +108,9 @@ function setup({
         attach: async (...args) => {
           calls.push(["attach", ...args]);
         },
+        detach: async (...args) => {
+          calls.push(["detach", ...args]);
+        },
       };
     },
     event: {
@@ -2074,4 +2077,16 @@ test("attach targets this conversation's supervisor at its selected location", a
   assert.deepEqual(call[2].location, { directory: "/chosen" });
   await s.bridge.stop();
   await assert.rejects(s.bridge.attach("existing"), /not running/);
+});
+
+test("detach targets this conversation's supervisor and needs a running conversation", async () => {
+  const s = setup();
+  await assert.rejects(s.bridge.detach("existing"), /not running/);
+  await s.bridge.start();
+  await s.bridge.detach("existing");
+  const call = s.calls.find(([type]) => type === "detach");
+  assert.deepEqual(call[1], { supervisorID: "session", sessionID: "existing" });
+  assert.deepEqual(call[2].location, { directory: "/chosen" });
+  await s.bridge.stop();
+  await assert.rejects(s.bridge.detach("existing"), /not running/);
 });

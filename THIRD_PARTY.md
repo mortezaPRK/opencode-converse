@@ -34,6 +34,16 @@ Hugging Face Transformers Whisper log-mel math (Apache-2.0; see
 `native/THIRD_PARTY.md`).
 This inventory does not establish blanket native redistribution clearance.
 
+Echo cancellation is **WebRTC AEC3** from `webrtc-audio-processing` 2.1.0 (tonarino Rust
+wrapper and the PulseAudio repackaging of Google's WebRTC audio processing, built from
+the bundled sources). The wrapper and WebRTC code are **BSD-3-Clause** (Copyright
+(c) 2011 The WebRTC project authors / Google Inc.) with Google's WebRTC patent grant
+(`PATENTS`, which terminates for a licensee who sues over WebRTC). It also contains
+FFTPACK (UCAR), Ooura FFT, Mark Olesen FFT, Wilco Dijkstra `spl_sqrt_floor`, and
+rnnoise-derived (Mozilla/Xiph/Jean-Marc Valin, BSD-3) sources, and builds against
+abseil-cpp (Apache-2.0) fetched by meson. See `native/THIRD_PARTY.md`. Binary
+redistribution must carry these notices; the exact-artifact review is still required.
+
 Before distributing native bundles, inventory the exact shipped libraries and
 their resolved source revisions, collect all required notices, and determine
 source-distribution and other obligations for the resulting bundle. Source-only

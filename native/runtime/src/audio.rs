@@ -141,6 +141,16 @@ fn heard_from_chunks(chunks: &[(String, u64)], played_ms: u64, generated_ms: u64
 fn strict_start(paused: bool, output_queued: bool, generating: bool) -> bool {
     !paused && (output_queued || generating)
 }
+/// The start guard for one capture frame. Without playback the normal check applies;
+/// during playback the guard depends on whether echo cancellation is removing it.
+fn barge_guard(playback_audible: bool, echo_cancellation: bool) -> turn::Guard {
+    playback_audible.then_some(if echo_cancellation {
+        turn::BargeGuard::ECHO_CANCELLED
+    } else {
+        turn::BargeGuard::UNCANCELLED
+    })
+}
+
 pub struct Backend {
     jobs: SyncSender<Job>,
     playback: Arc<Mutex<Playback>>,
@@ -375,6 +385,7 @@ impl Backend {
                     &models.turn,
                     endpointing(settings.endpointing),
                 )?;
+                let echo_cancellation = settings.echo_cancellation_enabled();
                 let mut asr = ve_asr::Asr::from_config(ve_asr::AsrConfig {
                     model_dir: models.asr.dir.clone(),
                     n_threads: settings
@@ -423,6 +434,7 @@ impl Backend {
                 let config = ve_audio::AudioConfig {
                     input_device: settings.input_device,
                     output_device: settings.output_device,
+                    echo_cancellation,
                     ..Default::default()
                 };
                 let audio = Arc::new(ve_audio::AudioIo::start(config.clone())?);
@@ -439,6 +451,7 @@ impl Backend {
                 let manager_health = thread_health.clone();
                 let manager_events = events.clone();
                 let manager_continuity = capture_continuity.clone();
+                let echo_reference = audio.echo_reference();
                 std::thread::spawn(move || {
                     let _health_guard = WorkerHealth(manager_health.clone());
                     let result = (|| -> anyhow::Result<()> {
@@ -467,6 +480,7 @@ impl Backend {
                                             let continuity = manager_continuity.clone();
                                             ve_audio::Capture::start(
                                                 &config,
+                                                echo_reference.clone(),
                                                 Box::new(move |event| {
                                                     if epoch.load(Ordering::Acquire) == generation
                                                         && !muted.load(Ordering::Acquire)
@@ -563,15 +577,18 @@ impl Backend {
                             if sequence != continuity {
                                 continue;
                             }
-                            let strict = {
+                            let guard = {
                                 let state = input_state.lock().unwrap();
-                                strict_start(
-                                    state.paused,
-                                    input_audio.output_queued_frames() > 0,
-                                    state.generation.busy(),
+                                barge_guard(
+                                    strict_start(
+                                        state.paused,
+                                        input_audio.output_queued_frames() > 0,
+                                        state.generation.busy(),
+                                    ),
+                                    echo_cancellation,
                                 )
                             };
-                            for event in detector.feed(&frame, strict)? {
+                            for event in detector.feed(&frame, guard)? {
                                 match event {
                                     turn::TurnEvent::SpeechStart => {
                                         capture_id += 1;
@@ -1096,6 +1113,25 @@ mod tests {
         assert!(strict_start(false, false, true));
         assert!(!strict_start(false, false, false));
         assert!(!strict_start(true, true, true));
+    }
+    #[test]
+    fn guard_selection_depends_on_playback_and_echo_cancellation() {
+        assert_eq!(barge_guard(false, true), None);
+        assert_eq!(barge_guard(false, false), None);
+        assert_eq!(
+            barge_guard(true, true),
+            Some(turn::BargeGuard::ECHO_CANCELLED)
+        );
+        assert_eq!(
+            barge_guard(true, false),
+            Some(turn::BargeGuard::UNCANCELLED)
+        );
+        // Echo cancellation only ever relaxes the guard.
+        let (aec, raw) = (
+            turn::BargeGuard::ECHO_CANCELLED,
+            turn::BargeGuard::UNCANCELLED,
+        );
+        assert!(aec.frames < raw.frames && aec.threshold < raw.threshold);
     }
     #[test]
     fn pause_before_the_device_opens_is_remembered() {

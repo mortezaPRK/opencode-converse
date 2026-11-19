@@ -21,6 +21,22 @@ pub struct Settings {
     pub endpointing: Option<EndpointingSetting>,
     #[serde(default)]
     pub acknowledgement: Option<AcknowledgementSetting>,
+    #[serde(default)]
+    pub echo_cancellation: Option<EchoCancellationSetting>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EchoCancellationSetting {
+    On,
+    Off,
+}
+
+impl Settings {
+    /// Echo cancellation is on unless the host explicitly turned it off.
+    pub fn echo_cancellation_enabled(&self) -> bool {
+        self.echo_cancellation != Some(EchoCancellationSetting::Off)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -226,7 +242,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off"}}"#,
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
@@ -235,9 +251,21 @@ mod tests {
         };
         assert_eq!(settings.endpointing, Some(EndpointingSetting::Patient));
         assert_eq!(settings.acknowledgement, Some(AcknowledgementSetting::Off));
+        assert_eq!(
+            settings.echo_cancellation,
+            Some(EchoCancellationSetting::Off)
+        );
+        assert!(!settings.echo_cancellation_enabled());
+        assert!(Settings::default().echo_cancellation_enabled());
         for bad in ["\"loud\"", "1", "true"] {
             let value =
                 format!(r#"{{"type":"init","protocol":1,"settings":{{"acknowledgement":{bad}}}}}"#);
+            assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
+        }
+        for bad in ["\"auto\"", "1", "true"] {
+            let value = format!(
+                r#"{{"type":"init","protocol":1,"settings":{{"echoCancellation":{bad}}}}}"#
+            );
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         assert!(serde_json::from_str::<Host>(

@@ -123,6 +123,12 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         if (!bridge || state().status === "off") await start();
         await bridge?.attach(route.sessionID);
       };
+      const detachCurrent = async () => {
+        const route = ctx.ui.router.current();
+        if (route.type !== "session") throw new Error("Open a session to stop talking to it");
+        if (!bridge || state().status === "off") throw new Error("Converse is not running");
+        await bridge.detach(route.sessionID);
+      };
       const view = () => presence(state().status, failure());
       const toneColor = (tone: PresenceTone) => {
         if (tone === "success") return ctx.theme.text.feedback.success.base;
@@ -192,6 +198,7 @@ export function createTui(dependencies: { bridge?: typeof createBridge } = {}) {
         { id: "stop", title: "stop conversation", run: () => attempt(stop) },
         { id: "mute", title: "mute/unmute microphone", run: () => attempt(() => bridge?.mute()) },
         { id: "attach", title: "talk to this session", run: () => attempt(attachCurrent) },
+        { id: "detach", title: "stop talking to this session", run: () => attempt(detachCurrent) },
         { id: "open", title: "open supervisor session", run: open },
         {
           id: "status",

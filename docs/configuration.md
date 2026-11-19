@@ -81,12 +81,19 @@ or the object form:
 }
 ```
 
-The supervisor session is created with the hidden `converse` agent. Every worker
-session is created with the hidden `converse-worker` agent unless the user asks
+The supervisor session is created with the hidden `converse` agent. A session the
+voice agent creates uses the hidden `converse-worker` agent unless the user asks
 for another visible primary agent (for example `plan`), validated against the
-server's agent list. Both agents are
-hidden from the normal agent picker and lists. Workers keep normal OpenCode
-permission behavior: the user approves or rejects requests on screen.
+server's agent list; this is a new session, and the agent of an existing session
+is never changed (OpenCode's prompt API has no per-prompt agent). Both hidden
+agents are absent from the normal agent picker and lists. The voice agent never
+owns other sessions: followed sessions (created or attached via `/converse-attach`
+or `converse_attach_session`) are tracked only in the plugin's storage, at most 16
+per conversation and one conversation per session, and are never marked or
+modified. `/converse-detach` or `converse_detach_session` stops following one
+without touching its work; stopping the conversation detaches all. Sessions follow
+normal OpenCode permission behavior: the user approves or rejects requests on
+screen.
 
 ## Speech model inventory
 
@@ -137,11 +144,23 @@ first clause boundary (comma, semicolon, colon, or dash) once it has at least fo
 words, so speech can start before the first full sentence has arrived. Later chunks
 keep whole sentences.
 
+`echoCancellation` (`"on"` default, or `"off"`) subtracts the engine's own playback
+from the microphone with WebRTC AEC3, so you can interrupt on speakers. The reference
+is the exact audio the output device callback plays (including silence while paused or
+after an interruption), so the filter stays adapted across interruptions. It adds up to
+10 ms of capture latency and some CPU. Quality depends on your speakers, microphone
+and room and has not been verified on real hardware; use `"off"` (and headphones) if it
+misbehaves. There is no environment override.
+
 ## Barge-in
 
-While the assistant speaks, interrupting requires about 480 ms of clearly loud
-speech. This guard is deliberately strict because acoustic echo cancellation is not
-implemented yet, and it is not configurable. The audio that tripped the guard is sent
+While the assistant speaks, the interrupt guard depends on `echoCancellation`. With it
+`"on"`, speech must be clearly voiced (VAD probability above 0.7) for 4 consecutive
+32 ms frames (about 128 ms). With `"off"`, the engine cannot tell your voice from its
+own echo, so it requires 15 frames above 0.85 (about 480 ms). Neither guard is
+configurable. With echo cancellation on, the 4 trigger frames plus 4 frames (about
+128 ms) before them are sent to speech recognition; with it off, the 15-frame window
+is. The audio that tripped the guard is sent
 to speech recognition, so the start of your interruption is kept. On interruption the
 engine reports `played_ms` and `generated_ms` (reply audio the speaker actually played
 versus audio generated) and a bounded `heard` text (up to 4 KiB: fully played
@@ -151,7 +170,7 @@ are never sent to the agent or the server. `heard` is an estimate proportional t
 audio position and is omitted when unknown.
 
 While spoken output is paused nothing is audible, so there is no echo and the normal
-(non-strict) speech-start check applies instead of the 480 ms guard. Interrupting
+(non-strict) speech-start check applies instead of the playback guard. Interrupting
 while paused discards the held speech; it is not resumed afterwards.
 
 ## Host preferences

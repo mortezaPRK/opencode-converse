@@ -16,6 +16,7 @@ export interface RuntimeConfig {
   readonly ttsThreads?: number;
   readonly endpointing?: Endpointing;
   readonly acknowledgement?: Acknowledgement;
+  readonly echoCancellation?: EchoCancellation;
 }
 
 export const PLUGIN_OPTION_KEYS = [
@@ -26,10 +27,12 @@ export const PLUGIN_OPTION_KEYS = [
   "ttsThreads",
   "endpointing",
   "acknowledgement",
+  "echoCancellation",
 ] as const;
 
 export type Endpointing = "responsive" | "patient";
 export type Acknowledgement = "auto" | "off";
+export type EchoCancellation = "on" | "off";
 
 const MAX_THREADS = 256;
 
@@ -78,6 +81,12 @@ function acknowledgementOption(value: unknown): Acknowledgement | undefined {
   return value;
 }
 
+function echoCancellationOption(value: unknown): EchoCancellation | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value !== "on" && value !== "off") throw new Error('echoCancellation must be "on" or "off"');
+  return value;
+}
+
 /** Structural parser shared by the server half and the local UI half. */
 export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const input = value === undefined || value === null ? {} : object(value);
@@ -86,11 +95,13 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const ttsThreads = threadOption(input.ttsThreads, "ttsThreads");
   const endpointing = endpointingOption(input.endpointing);
   const acknowledgement = acknowledgementOption(input.acknowledgement);
+  const echoCancellation = echoCancellationOption(input.echoCancellation);
   return {
     ...(asrThreads === undefined ? {} : { asrThreads }),
     ...(ttsThreads === undefined ? {} : { ttsThreads }),
     ...(endpointing === undefined ? {} : { endpointing }),
     ...(acknowledgement === undefined ? {} : { acknowledgement }),
+    ...(echoCancellation === undefined ? {} : { echoCancellation }),
   };
 }
 

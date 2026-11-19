@@ -16,7 +16,12 @@ native/target/release/opencode-converse doctor
 ```
 
 On Windows the executable has an `.exe` suffix. Building needs Rust and a C/C++
-toolchain. Linux additionally needs ALSA development headers and
+toolchain, plus **meson and ninja** on `PATH` (for example `brew install meson ninja`
+or `pip install meson`) and libclang (Xcode command line tools on macOS) for the
+bundled WebRTC audio processing build (`webrtc-audio-processing` `bundled`, about 40 s).
+Meson downloads the pinned abseil-cpp 20240722.0 source (and its wrapdb build patch)
+from github.com during that build, so the first build needs network access; Linux/Windows
+builds of this dependency have not been verified. Linux additionally needs ALSA development headers and
 pkg-config. Speech recognition (Moonshine) and the VAD/turn models run on CPU through the
 shared ONNX Runtime on every platform. macOS has
 a minimum deployment target of 13.4 for the downloaded ONNX Runtime archive.
@@ -63,6 +68,18 @@ cargo run --release --manifest-path native/Cargo.toml --locked -p opencode-conve
 
 References are the written text, so spoken forms such as "zero point three" or "dot ts"
 count as errors for engines that normalize to "0.3" or ".ts". Use for relative comparison.
+
+## Offline echo-cancellation measurement
+
+`aec_quality` needs the installed models and macOS `say`; it opens no audio device. It
+simulates an echo path (30-200 ms delay, reverb, loudspeaker clipping) around the real
+AEC3, turn detector with its barge-in guard, and Moonshine, and prints ERLE, false
+speech frames, near-end detection delay, and double-talk ASR. `--quick` runs one path,
+`--hard` uses heavy clipping and a 450 ms tail. It is a simulation, not a device test.
+
+```sh
+cargo run --release --manifest-path native/Cargo.toml --locked -p opencode-converse --features native-audio --example aec_quality
+```
 
 ## Native linking constraints
 

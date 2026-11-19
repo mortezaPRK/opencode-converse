@@ -95,5 +95,18 @@ export const Converse = Rpc.define({
         };
       }),
     },
+    detach: {
+      output: schema<void>((value) => {
+        if (value !== undefined && value !== null) throw new Error("detach returns no value");
+      }),
+      input: schema<{ supervisorID: string; sessionID: string }>((value) => {
+        const input = object(value);
+        keys(input, ["supervisorID", "sessionID"]);
+        return {
+          supervisorID: nonempty(input.supervisorID),
+          sessionID: nonempty(input.sessionID),
+        };
+      }),
+    },
   },
 });

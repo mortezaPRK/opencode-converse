@@ -8,7 +8,6 @@ import {
   Supervisor,
   SUPERVISOR_KEY,
   WORKER_AGENT,
-  WORKER_KEY,
   TOOL_SCHEMAS,
   parseOptions,
   watchWorkers,
@@ -91,8 +90,13 @@ function fixture(directory = "/project") {
 async function worker(f) {
   const { sessionID } = await f.service.start();
   await f.service.execute("start_session", { task: "Implement the feature" }, sessionID);
-  const session = [...f.sessions.values()].find((item) => item.metadata?.[WORKER_KEY]);
-  return { supervisorID: sessionID, workerID: session.id };
+  return { supervisorID: sessionID, workerID: followedIDs(f).at(-1) };
+}
+
+function followedIDs(f) {
+  return [...f.storage.keys()]
+    .filter((key) => key.startsWith("workers/"))
+    .map((key) => key.split("/").at(-1));
 }
 
 function deferred() {
@@ -735,7 +739,7 @@ test("canceling an active initial task reports its worker ID and preserves stopp
   f.ctx.session.prompt = async (input) => {
     workerID = input.sessionID;
     f.prompts.push(input);
-    f.sessions.get(workerID).metadata.humanHistory = "Preserve accepted work";
+    f.sessions.get(workerID).metadata = { humanHistory: "Preserve accepted work" };
     entered.resolve();
     await admission.promise;
   };
@@ -1355,7 +1359,7 @@ test("initial prompt failures report the registered worker and uncertain admissi
         attempts++;
         if (accepted) {
           f.prompts.push(input);
-          f.sessions.get(input.sessionID).metadata.humanHistory = "Must not be discarded";
+          f.sessions.get(input.sessionID).metadata = { humanHistory: "Must not be discarded" };
         }
         const error = new Error(`${name}: admission could not be confirmed ${"x".repeat(2000)}`);
         error.name = name;
@@ -1416,7 +1420,12 @@ test("uncertain initial prompt reporting stays inside the stop admission gate", 
   const summary = JSON.parse(output);
   assert.equal(interruptionsBeforeResponse, 0);
   assert.equal(summary.admissionStatus, "uncertain");
-  assert.equal(f.sessions.get(summary.sessionID).metadata[WORKER_KEY].supervisorID, sessionID);
+  assert.equal(
+    f.storage.has(`workers/${encodeURIComponent(f.service.owner)}/${summary.sessionID}`),
+    false,
+    "stopping detaches the created session",
+  );
+  assert.equal(f.sessions.get(summary.sessionID).metadata, undefined, "sessions are never branded");
   assert.equal(f.sessions.size, 2);
   assert.equal(f.prompts.length, 1);
   assert.deepEqual(f.interruptions, [{ sessionID, resume: false }]);
@@ -1474,7 +1483,10 @@ test("stop wins during worker lookup without steering, queuing, or interrupting 
           ? { sessionID: workerID, text: "late", queue }
           : { sessionID: workerID };
       const mutation = f.service.execute(name, input, supervisorID);
-      const rejected = assert.rejects(mutation, /owning Converse/);
+      const rejected = assert.rejects(
+        mutation,
+        /owning Converse|not followed by this conversation/,
+      );
       await entered.promise;
       await f.service.stop(supervisorID);
       release.resolve();
@@ -1604,11 +1616,10 @@ test("worker ownership is checked again when a mutation enters the admission gat
     { sessionID: workerID, text: "queued behind admission" },
     supervisorID,
   );
-  const rejected = assert.rejects(mutation, /not a worker owned/);
+  const rejected = assert.rejects(mutation, /not followed by this conversation/);
   await nextTick();
   const target = f.sessions.get(workerID);
   target.location = { directory: "/moved" };
-  target.metadata[WORKER_KEY].directory = "/moved";
   admission.resolve();
   await Promise.all([update, rejected]);
   assert.equal(f.prompts.length, 1);
@@ -1734,6 +1745,8 @@ test("server options validate models, runtime paths, and reject unknown fields",
     { endpointing: 1 },
     { acknowledgement: "loud" },
     { acknowledgement: true },
+    { echoCancellation: "auto" },
+    { echoCancellation: true },
   ]) {
     assert.throws(() => parseOptions(value));
   }
@@ -1753,13 +1766,15 @@ test("server options validate models, runtime paths, and reject unknown fields",
   assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, { endpointing: "patient" });
   assert.deepEqual(parseOptions({ acknowledgement: "off" }).runtime, { acknowledgement: "off" });
   assert.deepEqual(parseOptions({ acknowledgement: "auto" }).runtime, { acknowledgement: "auto" });
+  assert.deepEqual(parseOptions({ echoCancellation: "off" }).runtime, { echoCancellation: "off" });
+  assert.deepEqual(parseOptions({ echoCancellation: "on" }).runtime, { echoCancellation: "on" });
   assert.deepEqual(parseOptions({ $schema: "ignored" }), { runtime: {} });
   assert.deepEqual(parseOptions({}), { runtime: {} });
 });
 
 test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.equal(Converse.id, "converse");
-  assert.deepEqual(Object.keys(Converse.methods), ["hello", "start", "stop", "attach"]);
+  assert.deepEqual(Object.keys(Converse.methods), ["hello", "start", "stop", "attach", "detach"]);
   const hello = Converse.methods.hello.output["~standard"];
   assert.deepEqual(await hello.validate({ protocol: 1, packageRoot: "/pkg" }), {
     value: { protocol: 1, packageRoot: "/pkg" },
@@ -1784,6 +1799,7 @@ test("tools expose no permission decision or generic session executor", () => {
     "list_sessions",
     "list_agents",
     "attach_session",
+    "detach_session",
     "session_status",
     "start_session",
     "send_message",
@@ -1805,7 +1821,7 @@ test("tool execution checks durable owner marker, not only context hook", async 
   const other = await f.service.start();
   await assert.rejects(
     f.service.execute("send_message", { sessionID: workerID, text: "hijack" }, other.sessionID),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
   await f.service.execute("send_message", { sessionID: workerID, text: "steer" }, supervisorID);
   await f.service.execute(
@@ -1838,13 +1854,12 @@ test("worker paths and agents must be known, and moved workers lose authority", 
     { task: "work", directory: "/saved-worktree" },
     sessionID,
   );
-  const target = [...f.sessions.values()].find((item) => item.metadata?.[WORKER_KEY]);
+  const target = f.sessions.get(followedIDs(f).at(-1));
   assert.equal(target.location.directory, "/saved-worktree");
-  assert.equal(target.metadata[WORKER_KEY].supervisorID, sessionID);
   target.location = { directory: "/other" };
   await assert.rejects(
     f.service.execute("interrupt_session", { sessionID: target.id }, sessionID),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
 });
 
@@ -1934,10 +1949,9 @@ test("registered workers survive rolling discovery eviction with unchanged durab
   );
   await reloaded.execute("interrupt_session", { sessionID: created.id }, sessionID);
   created.location = { directory: "/moved" };
-  created.metadata[WORKER_KEY].directory = "/moved";
   await assert.rejects(
     reloaded.execute("interrupt_session", { sessionID: created.id }, sessionID),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
 });
 
@@ -2469,7 +2483,6 @@ test("workers default to the dedicated hidden voice agent", async () => {
     f.service.execute("start_session", { task: "work" }, sessionID),
     /was not created with the "converse-worker" agent/,
   );
-  assert.equal([...f.sessions.values()].filter((item) => item.metadata?.[WORKER_KEY]).length, 1);
   assert.equal([...f.storage.keys()].filter((key) => key.startsWith("workers/")).length, 1);
 });
 
@@ -2505,7 +2518,7 @@ test("worker metadata alone grants no authority and unrelated events make no ses
   });
   await assert.rejects(
     f.service.execute("send_message", { sessionID: forged.id, text: "inject" }, supervisorID),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
   let lookups = 0;
   const get = f.ctx.session.get;
@@ -2539,7 +2552,7 @@ test("worker metadata alone grants no authority and unrelated events make no ses
       { sessionID: workerID, text: "no longer owned" },
       supervisorID,
     ),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
 });
 
@@ -2755,7 +2768,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     { action: "*", resource: "*", effect: "allow" },
     { action: "converse", resource: "*", effect: "deny" },
   ]);
-  assert.equal(registeredTools.length, 8);
+  assert.equal(registeredTools.length, 9);
   for (const tool of registeredTools) {
     assert.deepEqual(tool.options, {
       namespace: "converse",
@@ -2817,7 +2830,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
   assert.deepEqual(disposed.sort(), ["agent", "hook", "rpc", "tools"]);
 });
 
-test("start_session and send_message choose only server-available, visible agents", async () => {
+test("start_session chooses only server-available, visible agents and sessions are never switched", async () => {
   const f = fixture();
   f.ctx.agent.list = async (input) => {
     assert.ok(input.location.directory);
@@ -2835,7 +2848,6 @@ test("start_session and send_message choose only server-available, visible agent
   const switched = [];
   f.ctx.session.switchAgent = async (input) => {
     switched.push(input);
-    f.sessions.get(input.sessionID).agent = input.agent;
   };
   const { sessionID } = await f.service.start();
   const listed = JSON.parse(await f.service.execute("list_agents", {}, sessionID));
@@ -2848,54 +2860,57 @@ test("start_session and send_message choose only server-available, visible agent
       f.service.execute("start_session", { task: "work", agent }, sessionID),
       /unavailable at this location/,
     );
-  assert.equal([...f.sessions.values()].filter((item) => item.metadata?.[WORKER_KEY]).length, 0);
+  assert.equal(followedIDs(f).length, 0);
   await f.service.execute("start_session", { task: "outline it", agent: "plan" }, sessionID);
   const created = [...f.sessions.values()].at(-1);
   assert.equal(created.agent, "plan");
-  assert.ok(created.metadata[WORKER_KEY]);
+  assert.equal(created.metadata, undefined);
   assert.equal(f.prompts.at(-1).text, "outline it");
   await assert.rejects(
     f.service.execute(
       "send_message",
-      { sessionID: created.id, text: "go", agent: "hidden" },
+      { sessionID: created.id, text: "now build", agent: "build" },
       sessionID,
     ),
-    /unavailable at this location/,
+    /agent/,
   );
+  assert.equal("agent" in TOOL_SCHEMAS.send_message.properties, false);
   assert.deepEqual(switched, []);
-  await f.service.execute(
-    "send_message",
-    { sessionID: created.id, text: "now build", agent: "build" },
-    sessionID,
-  );
-  assert.deepEqual(switched, [{ sessionID: created.id, agent: "build" }]);
-  assert.equal(f.prompts.at(-1).text, "now build");
+  assert.equal(created.agent, "plan");
 });
 
-test("attach_session adopts an existing session in the bound location only, never another conversation's", async () => {
+test("attach_session follows an existing session without writing to it", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
   const mine = await f.ctx.session.create({ title: "User work", agent: "build" });
+  const before = structuredClone(mine);
+  let writes = 0;
+  f.ctx.session.update = async (input) => {
+    if (input.sessionID === mine.id) writes++;
+    return Object.assign(f.sessions.get(input.sessionID), input);
+  };
+  f.ctx.session.switchAgent = async () => {
+    writes++;
+  };
   const summary = JSON.parse(
     await f.service.execute("attach_session", { sessionID: mine.id }, sessionID),
   );
   assert.equal(summary.attached, true);
-  assert.equal(f.sessions.get(mine.id).metadata[WORKER_KEY].supervisorID, sessionID);
-  assert.equal(f.sessions.get(mine.id).agent, "build", "attaching never changes the agent");
+  assert.equal(writes, 0, "attaching never mutates the target");
+  assert.deepEqual(f.sessions.get(mine.id), before);
   assert.equal(f.prompts.length, 0, "attaching sends nothing to the session");
-  // It is now an owned worker: prompts and status work, and lists mark it owned.
   await f.service.execute("send_message", { sessionID: mine.id, text: "continue" }, sessionID);
   assert.equal(f.prompts.at(-1).sessionID, mine.id);
+  assert.equal(f.prompts.at(-1).agent, undefined);
   const listed = JSON.parse(await f.service.execute("list_sessions", {}, sessionID));
-  assert.equal(listed.sessions.find((item) => item.sessionID === mine.id).owned, true);
+  assert.equal(listed.sessions.find((item) => item.sessionID === mine.id).followed, true);
   await f.service.execute("attach_session", { sessionID: mine.id }, sessionID);
 
   const other = await f.service.start();
   await assert.rejects(
     f.service.execute("attach_session", { sessionID: mine.id }, other.sessionID),
-    /another active Converse conversation/,
+    /already followed by another active Converse conversation/,
   );
-  assert.equal(f.sessions.get(mine.id).metadata[WORKER_KEY].supervisorID, sessionID);
   await assert.rejects(
     f.service.execute("attach_session", { sessionID: other.sessionID }, sessionID),
     /supervisor session cannot be attached/,
@@ -2912,28 +2927,130 @@ test("attach_session adopts an existing session in the bound location only, neve
     /archived/,
   );
 
-  // Once the first conversation stops, its claim lapses and the session can move on.
+  // Stopping detaches everything, so the other conversation may follow it.
   await f.service.stop(sessionID);
+  assert.equal(followedIDs(f).length, 0);
   await f.service.execute("attach_session", { sessionID: mine.id }, other.sessionID);
-  assert.equal(f.sessions.get(mine.id).metadata[WORKER_KEY].supervisorID, other.sessionID);
+  assert.deepEqual(f.sessions.get(mine.id), before);
+  assert.equal(f.sessions.get(mine.id).metadata, undefined);
 });
 
-test("attach failure restores registration and never removes the user's session", async () => {
+test("legacy converse:worker metadata is not ownership", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  const legacy = await f.ctx.session.create({
+    agent: "build",
+    metadata: {
+      "converse:worker": { supervisorID: sessionID, owner: f.service.owner, directory: "/project" },
+    },
+  });
+  await assert.rejects(
+    f.service.execute("send_message", { sessionID: legacy.id, text: "x" }, sessionID),
+    /not followed by this conversation/,
+  );
+  const other = await f.service.start();
+  await f.service.execute("attach_session", { sessionID: legacy.id }, other.sessionID);
+});
+
+test("detach_session stops prompts and announcements without touching the session", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
   const mine = await f.ctx.session.create({ agent: "build" });
-  f.ctx.session.update = async () => {
-    throw new Error("update failed");
+  await f.service.execute("attach_session", { sessionID: mine.id }, sessionID);
+  await f.service.execute("start_session", { task: "made" }, sessionID);
+  const made = followedIDs(f).find((id) => id !== mine.id);
+  const event = (id, sessionID) => ({
+    id,
+    type: "session.execution.succeeded",
+    data: { sessionID },
+    location: { directory: "/project" },
+  });
+  await f.service.onEvent(event("a", mine.id));
+  assert.equal(f.notices.length, 1);
+  for (const id of [mine.id, made]) {
+    const text = await f.service.execute("detach_session", { sessionID: id }, sessionID);
+    assert.match(text, /untouched/);
+  }
+  assert.equal(f.interruptions.length, 0, "detaching never aborts work");
+  assert.equal(f.sessions.has(mine.id) && f.sessions.has(made), true);
+  await f.service.onEvent(event("b", mine.id));
+  await f.service.onEvent(event("c", made));
+  assert.equal(f.notices.length, 1);
+  const prompts = f.prompts.length;
+  for (const name of ["send_message", "session_status", "interrupt_session"])
+    await assert.rejects(
+      f.service.execute(
+        name,
+        name === "send_message" ? { sessionID: mine.id, text: "x" } : { sessionID: mine.id },
+        sessionID,
+      ),
+      /not followed by this conversation/,
+    );
+  assert.equal(f.prompts.length, prompts);
+  await assert.rejects(
+    f.service.execute("detach_session", { sessionID: mine.id }, sessionID),
+    /not following/,
+  );
+  await f.service.execute("attach_session", { sessionID: mine.id }, sessionID);
+  await f.service.detachForUser(sessionID, mine.id);
+  assert.equal(followedIDs(f).length, 0);
+});
+
+test("stopping the conversation detaches created and attached sessions", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  const mine = await f.ctx.session.create({ agent: "build" });
+  await f.service.execute("attach_session", { sessionID: mine.id }, sessionID);
+  await f.service.execute("start_session", { task: "made" }, sessionID);
+  assert.equal(followedIDs(f).length, 2);
+  await f.service.stop(sessionID);
+  assert.equal(followedIDs(f).length, 0);
+  assert.equal(f.sessions.has(mine.id), true);
+  await f.service.onEvent({
+    id: "late",
+    type: "session.execution.succeeded",
+    data: { sessionID: mine.id },
+    location: { directory: "/project" },
+  });
+  assert.equal(f.notices.length, 0);
+});
+
+test("a conversation follows at most 16 sessions", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  for (let i = 0; i < 16; i++) {
+    const item = await f.ctx.session.create({ agent: "build" });
+    await f.service.execute("attach_session", { sessionID: item.id }, sessionID);
+  }
+  const extra = await f.ctx.session.create({ agent: "build" });
+  await assert.rejects(
+    f.service.execute("attach_session", { sessionID: extra.id }, sessionID),
+    /already follows 16/,
+  );
+  await assert.rejects(
+    f.service.execute("start_session", { task: "more" }, sessionID),
+    /already follows 16/,
+  );
+  await f.service.detachForUser(sessionID, followedIDs(f)[0]);
+  await f.service.execute("attach_session", { sessionID: extra.id }, sessionID);
+});
+
+test("attach registration failure leaves the user's session untouched", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  const mine = await f.ctx.session.create({ agent: "build" });
+  f.ctx.storage.set = async () => {
+    throw new Error("storage failed");
   };
   await assert.rejects(
     f.service.execute("attach_session", { sessionID: mine.id }, sessionID),
-    /update failed/,
+    /storage failed/,
   );
   assert.ok(f.sessions.has(mine.id));
-  assert.equal([...f.storage.keys()].filter((key) => key.startsWith("workers/")).length, 0);
+  assert.equal(followedIDs(f).length, 0);
   await assert.rejects(
     f.service.execute("send_message", { sessionID: mine.id, text: "x" }, sessionID),
-    /not a worker owned/,
+    /not followed by this conversation/,
   );
 });
 

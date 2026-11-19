@@ -35,6 +35,9 @@ export const ConverseDesktop = Ipc.define({
     attach: {
       input: Schema.Struct({ sessionID: Schema.String }),
     },
+    detach: {
+      input: Schema.Struct({ sessionID: Schema.String }),
+    },
     stop: {},
     mute: {},
     pause: {

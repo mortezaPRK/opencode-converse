@@ -129,6 +129,10 @@ function setup({ stop, start, fixture, options } = {}) {
         async attach(sessionID) {
           bridge.attached.push(sessionID);
         },
+        detached: [],
+        async detach(sessionID) {
+          bridge.detached.push(sessionID);
+        },
         pause(paused) {
           bridge.paused.push(paused);
           state.paused = paused;
@@ -508,6 +512,7 @@ function statusSetup({
 } = {}) {
   const state = { status, paused: false, sessionID, serverID: sessionID ? "remote" : null };
   const attached = [];
+  const detached = [];
   const starts = [];
   const toasts = [];
   let titlebar;
@@ -549,6 +554,9 @@ function statusSetup({
       attach: async (input) => {
         attached.push(input.sessionID);
       },
+      detach: async (input) => {
+        detached.push(input.sessionID);
+      },
       stop: async () => {},
       mute: async () => {},
       pause: async (input) => {
@@ -567,6 +575,7 @@ function statusSetup({
   return {
     state,
     attached,
+    detached,
     starts,
     toasts,
     pauses,
@@ -714,6 +723,38 @@ test("GUI attach is routed to the owning window's bridge and needs a running con
   await s.api.attach({ sessionID: "open" }, s.caller(1));
   assert.deepEqual(s.bridges[0].attached, ["open"]);
   await s.cleanup();
+});
+
+test("GUI detach is routed to the owning window's bridge and needs a running conversation", async () => {
+  const s = setup();
+  await assert.rejects(s.api.detach({ sessionID: "open" }, s.caller(1)), /not running/);
+  await s.api.start({ serverID: "remote", directory: "/chosen" }, s.caller(1));
+  await assert.rejects(s.api.detach({ sessionID: "open" }, s.caller(2)), /owned by another window/);
+  await s.api.detach({ sessionID: "open" }, s.caller(1));
+  assert.deepEqual(s.bridges[0].detached, ["open"]);
+  await s.cleanup();
+});
+
+test("GUI stop-talking-to-this-session detaches only the viewed session of the running conversation", async () => {
+  const viewed = { id: "viewed", server: { id: "remote" }, directory: "/chosen" };
+  const running = statusSetup({ status: "listening", current: viewed });
+  await running.command("detach").run();
+  assert.deepEqual(running.detached, ["viewed"]);
+  running.cleanup();
+
+  const idle = statusSetup({ sessionID: null, current: viewed });
+  await idle.command("detach").run();
+  assert.deepEqual(idle.detached, []);
+  assert.match(idle.toasts.at(-1).description, /not running/);
+  idle.cleanup();
+
+  const elsewhere = statusSetup({
+    status: "listening",
+    current: { id: "viewed", server: { id: "other" }, directory: "/chosen" },
+  });
+  await elsewhere.command("detach").run();
+  assert.deepEqual(elsewhere.detached, []);
+  elsewhere.cleanup();
 });
 
 test("GUI talk-to-this-session attaches the viewed session and never retargets a running conversation", async () => {

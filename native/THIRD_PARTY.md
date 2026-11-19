@@ -55,6 +55,23 @@ The source setup uses these components, among others:
   `tokenizer.bin` layout come from there. No Moonshine source is copied or linked.
   Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI), MIT.
 - ONNX Runtime: MIT.
+- **webrtc-audio-processing 2.1.0** (`webrtc-audio-processing-sys` + wrapper +
+  `webrtc-audio-processing-config`, tonarino; `license-file = COPYING`, BSD-3-Clause,
+  identical to WebRTC's): echo cancellation (AEC3) and high-pass filter, statically
+  linked via the `bundled` feature (about 29 MB static archive before linking). Its
+  vendored sources and the notices to preserve in a binary distribution:
+  - WebRTC (`webrtc/LICENSE`, BSD-3, Copyright (c) 2011 The WebRTC project authors)
+    and the WebRTC Additional IP Rights Grant (Patents) in `webrtc/PATENTS`.
+  - `third_party/pffft` (FFTPACK license, UCAR; Julien Pommier), `third_party/rnnoise`
+    (BSD-3, Mozilla, Xiph.Org, Jean-Marc Valin, Mark Borgerding), `modules/third_party/fft`
+    (Mark Olesen, Queen's Univ. at Kingston), `common_audio/third_party/ooura` (Takuya
+    Ooura, permissive), `common_audio/third_party/spl_sqrt_floor` (Wilco Dijkstra).
+  - abseil-cpp 20240722.0 (Apache-2.0), downloaded by meson at build time
+    (tarball SHA-256 `f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3`,
+    plus the meson wrapdb build patch). Apache-2.0 notices must be shipped.
+    Build tools only: meson, ninja, bindgen/libclang, autotools (crate). This review
+    is by license-file inspection of the 2.1.0 crate sources, **not** an exact-artifact
+    audit of a shipped binary; that remains a redistribution gate.
 - **ptts 0.7.1** (Gradium Phonon runtime, `github.com/gradium-ai/xn-ptts`):
   **MIT OR Apache-2.0** per its crates.io manifest. Built with only the `hf`
   (tokenizer) feature; the `hub` network-download feature is never enabled. Its

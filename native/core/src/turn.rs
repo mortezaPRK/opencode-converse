@@ -1,18 +1,49 @@
 //! Turn detection: VAD-gated utterance assembly + Smart Turn end-of-turn decision.
 //!
-//! A stricter barge-in guard reduces triggering on the engine's own playback.
+//! A stricter barge-in guard reduces triggering on the engine's own playback; it is
+//! relaxed when acoustic echo cancellation is removing that playback from the microphone.
 
 use std::collections::VecDeque;
 
 /// 16 kHz mono frame size the VAD consumes (32 ms).
 pub const VAD_FRAME: usize = 512;
 const SR: usize = 16_000;
-/// Strict barge-in guard (also the pre-roll length, ~480 ms): consecutive frames at
-/// p > 0.85 while we are speaking. Deliberately conservative until acoustic echo
-/// cancellation exists; do not lower it before AEC lands, or playback bleeding into
-/// the mic will interrupt the reply. Pre-roll is exactly the trigger window, so a
-/// quieter onset that preceded it (p <= 0.85) is not kept.
-const BARGE_FRAMES: usize = 15;
+/// Pre-roll kept ahead of a normal (non-playback) speech start, ~480 ms.
+const NORMAL_PRE_ROLL: usize = 15;
+
+/// Barge-in guard while the engine's own voice may reach the microphone: `frames`
+/// consecutive VAD frames with p > `threshold` before the user is believed.
+///
+/// `pre_roll` is how many recent frames are kept so the interrupting user's first
+/// syllables reach ASR: at least the whole trigger window, plus onset margin when the
+/// window is short enough that a quieter onset could precede it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BargeGuard {
+    pub frames: u32,
+    pub threshold: f32,
+    pub pre_roll: usize,
+}
+
+impl BargeGuard {
+    /// No echo cancellation: playback leaks into the mic, so require ~480 ms of
+    /// clearly voiced audio. Pre-roll is exactly the trigger window.
+    pub const UNCANCELLED: Self = Self {
+        frames: 15,
+        threshold: 0.85,
+        pre_roll: 15,
+    };
+    /// Echo cancellation is on: the residual echo rarely stays voiced, so ~128 ms at
+    /// p > 0.7 suffices (see `aec_quality`). Pre-roll adds four frames (~128 ms) of onset
+    /// margin, without dragging ~350 ms of echo residual into the ASR input.
+    pub const ECHO_CANCELLED: Self = Self {
+        frames: 4,
+        threshold: 0.7,
+        pre_roll: 8,
+    };
+}
+
+/// The guard in force for one `feed`: `None` is the normal start check.
+pub type Guard = Option<BargeGuard>;
 const MAX_CAPTURE_SECONDS: usize = 120;
 
 fn capture_limit_reached(buf: &mut Vec<f32>, frame: &[f32]) -> bool {
@@ -27,16 +58,21 @@ fn finish_utterance(buf: &mut Vec<f32>, p_complete: f32) -> TurnEvent {
     }
 }
 
-fn triggering_voiced_samples(normal_run: u32, strict_run: u32, strict: bool) -> usize {
-    (if strict { strict_run } else { normal_run }) as usize * VAD_FRAME
+fn triggering_voiced_samples(normal_run: u32, strict_run: u32, guard: Guard) -> usize {
+    (if guard.is_some() {
+        strict_run
+    } else {
+        normal_run
+    }) as usize
+        * VAD_FRAME
 }
 
 fn meets_speech_minimum(voiced_samples: usize, minimum: f32) -> bool {
     voiced_samples as f32 / SR as f32 >= minimum
 }
 
-fn push_pre(pre: &mut VecDeque<Vec<f32>>, frame: Vec<f32>) {
-    if pre.len() == BARGE_FRAMES {
+fn push_pre(pre: &mut VecDeque<Vec<f32>>, frame: Vec<f32>, capacity: usize) {
+    while pre.len() >= capacity.max(1) {
         pre.pop_front();
     }
     pre.push_back(frame);
@@ -48,20 +84,26 @@ fn candidate_start(
     pre: &mut VecDeque<Vec<f32>>,
     frame: &[f32],
     p: f32,
-    strict: bool,
+    guard: Guard,
     start_frames: u32,
 ) -> bool {
-    push_pre(pre, frame.to_vec());
+    push_pre(
+        pre,
+        frame.to_vec(),
+        guard.map_or(NORMAL_PRE_ROLL, |g| g.pre_roll),
+    );
     *run = if p > 0.5 { run.saturating_add(1) } else { 0 };
-    *strict_run = if p > 0.85 {
+    // The strict run always tracks the active guard's threshold; a toggle between
+    // guards (echo cancellation never changes mid-conversation) cannot mix them.
+    let threshold = guard.map_or(BargeGuard::UNCANCELLED.threshold, |g| g.threshold);
+    *strict_run = if p > threshold {
         strict_run.saturating_add(1)
     } else {
         0
     };
-    if strict {
-        *strict_run >= BARGE_FRAMES as u32
-    } else {
-        *run >= start_frames
+    match guard {
+        Some(g) => *strict_run >= g.frames,
+        None => *run >= start_frames,
     }
 }
 
@@ -171,11 +213,11 @@ impl TurnDetector {
     }
 
     /// Feed 16 kHz mono PCM; native and scripted scores share these transitions.
-    /// Strict playback detection requires fifteen consecutive louder VAD frames.
-    pub fn feed(&mut self, samples: &[f32], strict: bool) -> anyhow::Result<Vec<TurnEvent>> {
+    /// With a `guard`, speech starts only after its run of louder VAD frames.
+    pub fn feed(&mut self, samples: &[f32], guard: Guard) -> anyhow::Result<Vec<TurnEvent>> {
         self.state.feed(
             samples,
-            strict,
+            guard,
             &mut NativeScores {
                 vad: &mut self.vad,
                 turn: &self.turn,
@@ -190,7 +232,7 @@ impl Default for TurnState {
             pending: Vec::new(),
             in_speech: false,
             buf: Vec::new(),
-            pre: VecDeque::with_capacity(BARGE_FRAMES),
+            pre: VecDeque::with_capacity(NORMAL_PRE_ROLL),
             run: 0,
             strict_run: 0,
             silence: 0,
@@ -235,13 +277,13 @@ impl TurnState {
     /// Feed 16 kHz mono samples of any length. Internally re-frames to
     /// [`VAD_FRAME`] and returns one event per state change.
     ///
-    /// `strict` enables the barge-in guard: while the engine is speaking we
-    /// require `barge_frames` louder frames before believing the user really
-    /// spoke, so playback bleeding into the mic cannot interrupt us.
+    /// `guard` is the barge-in guard: while the engine is speaking we require its
+    /// run of louder frames before believing the user really spoke, so playback
+    /// bleeding into the mic cannot interrupt us.
     fn feed(
         &mut self,
         samples: &[f32],
-        strict: bool,
+        guard: Guard,
         scores: &mut impl Scores,
     ) -> anyhow::Result<Vec<TurnEvent>> {
         self.pending.extend_from_slice(samples);
@@ -249,7 +291,7 @@ impl TurnState {
 
         while self.pending.len() >= VAD_FRAME {
             let frame: Vec<f32> = self.pending.drain(..VAD_FRAME).collect();
-            if let Some(ev) = self.feed_frame(&frame, strict, scores)? {
+            if let Some(ev) = self.feed_frame(&frame, guard, scores)? {
                 out.push(ev);
             }
         }
@@ -259,7 +301,7 @@ impl TurnState {
     fn feed_frame(
         &mut self,
         frame: &[f32],
-        strict: bool,
+        guard: Guard,
         scores: &mut impl Scores,
     ) -> anyhow::Result<Option<TurnEvent>> {
         let p = scores.voice(frame)?;
@@ -271,13 +313,13 @@ impl TurnState {
                 &mut self.pre,
                 frame,
                 p,
-                strict,
+                guard,
                 self.start_frames,
             ) {
                 self.in_speech = true;
                 self.buf = self.pre.iter().flatten().copied().collect();
                 // Credit the qualifying voiced trigger, never silent preroll.
-                self.voiced_samples = triggering_voiced_samples(self.run, self.strict_run, strict);
+                self.voiced_samples = triggering_voiced_samples(self.run, self.strict_run, guard);
                 self.silence = 0;
                 self.checked = false;
                 self.frames_since_check = 0;
@@ -339,6 +381,8 @@ impl TurnState {
 mod tests {
     use super::*;
 
+    const UNCANCELLED_FRAMES: usize = BargeGuard::UNCANCELLED.frames as usize;
+
     #[derive(Default)]
     struct ScriptedScores {
         turns: VecDeque<f32>,
@@ -379,11 +423,19 @@ mod tests {
             }
         }
         fn feed(&mut self, samples: &[f32], strict: bool) -> Vec<TurnEvent> {
-            self.state.feed(samples, strict, &mut self.scores).unwrap()
+            self.feed_guard(samples, strict.then_some(BargeGuard::UNCANCELLED))
+        }
+        fn feed_guard(&mut self, samples: &[f32], guard: Guard) -> Vec<TurnEvent> {
+            self.state.feed(samples, guard, &mut self.scores).unwrap()
         }
         fn frames(&mut self, count: usize, probability: f32, strict: bool) -> Vec<TurnEvent> {
             (0..count)
                 .flat_map(|_| self.feed(&[probability; VAD_FRAME], strict))
+                .collect()
+        }
+        fn guarded_frames(&mut self, count: usize, p: f32, guard: BargeGuard) -> Vec<TurnEvent> {
+            (0..count)
+                .flat_map(|_| self.feed_guard(&[p; VAD_FRAME], Some(guard)))
                 .collect()
         }
         fn reset(&mut self) {
@@ -537,7 +589,7 @@ mod tests {
         assert!(f.frames(4, 0.6, false).is_empty());
         assert!(f.frames(14, 0.9, true).is_empty());
         assert_eq!(f.frames(1, 0.9, true), [TurnEvent::SpeechStart]);
-        assert_eq!(f.state.buf.len(), BARGE_FRAMES * VAD_FRAME);
+        assert_eq!(f.state.buf.len(), UNCANCELLED_FRAMES * VAD_FRAME);
         assert!(f.state.buf.iter().all(|sample| *sample == 0.9));
         assert!(matches!(
             f.frames(8, 0.0, true).as_slice(),
@@ -549,22 +601,23 @@ mod tests {
     }
     #[test]
     fn trigger_credit_uses_the_selected_threshold_counter() {
-        assert_eq!(triggering_voiced_samples(5, 0, false), 5 * VAD_FRAME);
-        assert_eq!(triggering_voiced_samples(100, 15, true), 15 * VAD_FRAME);
+        let guard = Some(BargeGuard::ECHO_CANCELLED);
+        assert_eq!(triggering_voiced_samples(5, 0, None), 5 * VAD_FRAME);
+        assert_eq!(triggering_voiced_samples(100, 4, guard), 4 * VAD_FRAME);
     }
     #[test]
     fn strict_guard_does_not_reuse_weak_normal_mode_candidates() {
         let mut run = 0;
         let mut strict_run = 0;
         let mut pre = VecDeque::new();
-        let mut feed = |p, strict| {
+        let mut feed = |p, strict: bool| {
             candidate_start(
                 &mut run,
                 &mut strict_run,
                 &mut pre,
                 &[p; VAD_FRAME],
                 p,
-                strict,
+                strict.then_some(BargeGuard::UNCANCELLED),
                 5,
             )
         };
@@ -575,7 +628,7 @@ mod tests {
             assert!(!feed(0.9, true));
         }
         assert!(feed(0.9, true));
-        assert_eq!(pre.len(), BARGE_FRAMES);
+        assert_eq!(pre.len(), UNCANCELLED_FRAMES);
         assert!(pre.iter().flatten().all(|sample| *sample == 0.9));
     }
     #[test]
@@ -583,14 +636,14 @@ mod tests {
         let mut normal = 0;
         let mut strict_run = 0;
         let mut pre = VecDeque::new();
-        let mut feed = |strict| {
+        let mut feed = |strict: bool| {
             candidate_start(
                 &mut normal,
                 &mut strict_run,
                 &mut pre,
                 &[0.9; VAD_FRAME],
                 0.9,
-                strict,
+                strict.then_some(BargeGuard::UNCANCELLED),
                 5,
             )
         };
@@ -611,28 +664,98 @@ mod tests {
     #[test]
     fn strict_preroll_retains_the_entire_detection_window() {
         let mut pre = VecDeque::new();
-        for id in 0..BARGE_FRAMES {
-            push_pre(&mut pre, vec![id as f32; VAD_FRAME]);
+        let cap = BargeGuard::UNCANCELLED.pre_roll;
+        for id in 0..UNCANCELLED_FRAMES {
+            push_pre(&mut pre, vec![id as f32; VAD_FRAME], cap);
         }
         let audio: Vec<f32> = pre.iter().flatten().copied().collect();
-        assert_eq!(audio.len(), BARGE_FRAMES * VAD_FRAME);
+        assert_eq!(audio.len(), UNCANCELLED_FRAMES * VAD_FRAME);
         assert_eq!(audio[0], 0.0);
-        push_pre(&mut pre, vec![99.0; VAD_FRAME]);
-        assert_eq!(pre.len(), BARGE_FRAMES);
+        push_pre(&mut pre, vec![99.0; VAD_FRAME], cap);
+        assert_eq!(pre.len(), UNCANCELLED_FRAMES);
         assert_eq!(pre.front().unwrap()[0], 1.0);
     }
     #[test]
     fn barge_in_utterance_keeps_the_whole_strict_trigger_window() {
         let mut f = Fixture::new(&[0.9]);
         assert!(f.frames(30, 0.0, true).is_empty());
-        assert_eq!(f.frames(BARGE_FRAMES, 0.9, true), [TurnEvent::SpeechStart]);
+        assert_eq!(
+            f.frames(UNCANCELLED_FRAMES, 0.9, true),
+            [TurnEvent::SpeechStart]
+        );
         let events = f.frames(8, 0.0, true);
         let [TurnEvent::Utterance { audio, .. }] = events.as_slice() else {
             panic!("expected utterance");
         };
         // The ~480 ms that tripped the guard are all sent to ASR; earlier silence is not.
-        assert!(audio[..BARGE_FRAMES * VAD_FRAME].iter().all(|s| *s == 0.9));
-        assert_eq!(audio.len(), (BARGE_FRAMES + 8) * VAD_FRAME);
+        assert!(audio[..UNCANCELLED_FRAMES * VAD_FRAME]
+            .iter()
+            .all(|s| *s == 0.9));
+        assert_eq!(audio.len(), (UNCANCELLED_FRAMES + 8) * VAD_FRAME);
+    }
+    #[test]
+    fn guards_are_the_documented_constants() {
+        assert_eq!(
+            BargeGuard::UNCANCELLED,
+            BargeGuard {
+                frames: 15,
+                threshold: 0.85,
+                pre_roll: 15
+            }
+        );
+        assert_eq!(
+            BargeGuard::ECHO_CANCELLED,
+            BargeGuard {
+                frames: 4,
+                threshold: 0.7,
+                pre_roll: 8
+            }
+        );
+        for g in [BargeGuard::UNCANCELLED, BargeGuard::ECHO_CANCELLED] {
+            assert!(
+                g.pre_roll >= g.frames as usize,
+                "pre-roll covers the trigger"
+            );
+        }
+    }
+    #[test]
+    fn echo_cancelled_guard_starts_after_four_frames_above_its_threshold() {
+        let g = BargeGuard::ECHO_CANCELLED;
+        let mut f = Fixture::new(&[0.9]);
+        // Under the relaxed threshold nothing starts, however long it lasts...
+        assert!(f.guarded_frames(40, 0.69, g).is_empty());
+        // ...three frames are not enough, and an interruption restarts the count...
+        assert!(f.guarded_frames(3, 0.75, g).is_empty());
+        assert!(f.guarded_frames(1, 0.3, g).is_empty());
+        assert!(f.guarded_frames(3, 0.75, g).is_empty());
+        // ...the fourth consecutive one starts it, where the uncancelled guard would not.
+        assert_eq!(f.guarded_frames(1, 0.75, g), [TurnEvent::SpeechStart]);
+        let mut f = Fixture::new(&[0.9]);
+        assert!(f.frames(14, 0.75, true).is_empty());
+    }
+    #[test]
+    fn echo_cancelled_barge_in_keeps_the_trigger_window_and_onset_margin_only() {
+        let g = BargeGuard::ECHO_CANCELLED;
+        let mut f = Fixture::new(&[0.9]);
+        // Echo residual (p=0.2) fills far more than the pre-roll; a quieter onset (0.6) follows.
+        assert!(f.guarded_frames(30, 0.2, g).is_empty());
+        assert!(f.guarded_frames(3, 0.6, g).is_empty());
+        assert_eq!(f.guarded_frames(4, 0.9, g), [TurnEvent::SpeechStart]);
+        // The trigger credits only 128 ms; the user keeps talking past the 0.3 s minimum.
+        assert!(f.guarded_frames(6, 0.9, g).is_empty());
+        let events = f.guarded_frames(8, 0.0, g);
+        let [TurnEvent::Utterance { audio, .. }] = events.as_slice() else {
+            panic!("expected utterance");
+        };
+        assert_eq!(audio.len(), (g.pre_roll + 6 + 8) * VAD_FRAME);
+        let count = |v: f32| audio.iter().filter(|s| **s == v).count();
+        assert_eq!(
+            count(0.9),
+            10 * VAD_FRAME,
+            "whole trigger window and the rest"
+        );
+        assert_eq!(count(0.6), 3 * VAD_FRAME, "the quieter onset before it");
+        assert_eq!(count(0.2), VAD_FRAME, "only one frame of older residual");
     }
     #[test]
     fn normal_start_preroll_keeps_quiet_audio_before_the_trigger() {

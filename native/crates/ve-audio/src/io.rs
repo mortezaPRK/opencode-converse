@@ -22,6 +22,7 @@ use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 
+use crate::echo::{tap_block, EchoReference, EchoStage};
 use crate::resample::StreamResampler;
 use crate::AudioConfig;
 
@@ -148,6 +149,8 @@ pub struct AudioIo {
     underruns: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    /// Played-sample tap for echo cancellation; `None` when disabled.
+    echo_reference: Option<EchoReference>,
 }
 
 /// Independently owned microphone capture. Dropping this releases the input
@@ -204,8 +207,12 @@ fn capture_samples(
 }
 
 impl Capture {
+    /// `echo` is the playback tap from [`AudioIo::echo_reference`]; with `Some`, every
+    /// block is echo-cancelled before it is delivered. The 10 ms AEC framing means
+    /// delivery lags capture by up to one frame.
     pub fn start(
         cfg: &AudioConfig,
+        echo: Option<EchoReference>,
         on_input: Box<dyn FnMut(CaptureEvent<'_>) + Send>,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -259,9 +266,11 @@ impl Capture {
             rate,
             cfg.target_in_rate,
             cfg.block_frames,
+            echo,
             gap_generation,
             stop.clone(),
             failed.clone(),
+            failure.clone(),
         )?;
         Ok(Self {
             stream: Some(stream),
@@ -343,6 +352,12 @@ impl AudioIo {
             handle: output_worker,
         };
 
+        let (mut tap, echo_reference) = if cfg.echo_cancellation {
+            let (producer, reference) = EchoReference::pair(out_rate);
+            (Some(producer), Some(reference))
+        } else {
+            (None, None)
+        };
         let cb_control = control.clone();
         let cb_queued = active_queued.clone();
         let cb_paused = paused.clone();
@@ -368,7 +383,11 @@ impl AudioIo {
                         || cb_control.flush_gen.load(Ordering::SeqCst) != last_gen
                     {
                         // Paused or barge-in in progress: silence and keep the queue for resume.
+                        // The reference carries the silence too, keeping the AEC warm.
                         data.fill(0.0);
+                        if let Some(tap) = tap.as_mut() {
+                            tap_block(tap, data, channels);
+                        }
                         return;
                     }
 
@@ -404,6 +423,9 @@ impl AudioIo {
                     if got < frames && before > 0 {
                         cb_underruns.fetch_add(1, Ordering::Relaxed);
                     }
+                    if let Some(tap) = tap.as_mut() {
+                        tap_block(tap, data, channels);
+                    }
                     if got > 0 {
                         cb_control
                             .played_frames
@@ -437,7 +459,13 @@ impl AudioIo {
             underruns,
             stop,
             failed,
+            echo_reference,
         })
+    }
+
+    /// The tap of exactly what the output callback plays, for [`Capture::start`].
+    pub fn echo_reference(&self) -> Option<EchoReference> {
+        self.echo_reference.clone()
     }
 
     /// Pauses or resumes playback without flushing queued audio or stopping the stream.
@@ -625,13 +653,21 @@ fn spawn_input_worker(
     in_rate: u32,
     out_rate: u32,
     block_frames: usize,
+    echo: Option<EchoReference>,
     gap_generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
 ) -> Result<JoinHandle<()>> {
     anyhow::ensure!(block_frames > 0, "Capture block_frames must be non-zero");
+    anyhow::ensure!(
+        echo.is_none() || out_rate == crate::echo::AEC_RATE,
+        "Echo cancellation requires {} Hz capture",
+        crate::echo::AEC_RATE
+    );
     let mut processor = CaptureProcessor {
         resampler: StreamResampler::new(in_rate, out_rate)?,
+        echo: echo.map(EchoStage::new).transpose()?,
         acc: Vec::with_capacity(block_frames * 4),
         block_frames,
         generation: 0,
@@ -669,25 +705,41 @@ fn spawn_input_worker(
                 std::thread::sleep(POLL_INTERVAL);
                 continue;
             }
-            processor
-                .acc
-                .extend_from_slice(&processor.resampler.process(&pull[..n]));
+            let resampled = processor.resampler.process(&pull[..n]);
+            if let Err(e) = processor.accept(&resampled) {
+                record_failure(&failure, e.to_string());
+                return;
+            }
             processor.emit_blocks(&gap_generation, &mut on_input);
         }
         // Hand over the resampler's tail so the last few milliseconds are not lost.
         processor.check_gap(&gap_generation, &mut on_input);
-        processor
-            .acc
-            .extend_from_slice(&processor.resampler.flush());
+        let tail = processor.resampler.flush();
+        if let Err(e) = processor.accept(&tail) {
+            record_failure(&failure, e.to_string());
+            return;
+        }
         processor.emit_blocks(&gap_generation, &mut on_input);
+        // End of stream: a sub-frame echo remainder goes out unprocessed, unpadded.
+        if let Some(echo) = processor.echo.as_mut() {
+            let rest = echo.take_remainder();
+            processor.acc.extend_from_slice(&rest);
+        }
         if !processor.check_gap(&gap_generation, &mut on_input) && !processor.acc.is_empty() {
             on_input(CaptureEvent::Frame(&processor.acc));
         }
     }))
 }
 
+fn record_failure(slot: &Mutex<Option<String>>, detail: String) {
+    if let Ok(mut slot) = slot.lock() {
+        slot.get_or_insert(detail);
+    }
+}
+
 struct CaptureProcessor {
     resampler: StreamResampler,
+    echo: Option<EchoStage>,
     acc: Vec<f32>,
     block_frames: usize,
     generation: u64,
@@ -705,8 +757,25 @@ impl CaptureProcessor {
         self.generation = generation;
         self.resampler.reset();
         self.acc.clear();
+        if let Some(echo) = self.echo.as_mut() {
+            // Cannot fail in practice (poisoned lock); a stale frame would only
+            // misalign the reference until AEC3 re-estimates the delay.
+            let _ = echo.resync();
+        }
         on_input(CaptureEvent::Gap);
         true
+    }
+
+    /// Resampled 16 kHz capture enters the block accumulator, echo-cancelled in
+    /// whole 10 ms frames when a playback reference exists.
+    fn accept(&mut self, resampled: &[f32]) -> Result<()> {
+        match self.echo.as_mut() {
+            Some(echo) => echo.process(resampled, &mut self.acc),
+            None => {
+                self.acc.extend_from_slice(resampled);
+                Ok(())
+            }
+        }
     }
 
     fn emit_blocks(
@@ -1067,6 +1136,7 @@ mod tests {
                 underruns: Arc::new(AtomicU64::new(0)),
                 stop: Arc::new(AtomicBool::new(false)),
                 failed: Arc::new(AtomicBool::new(false)),
+                echo_reference: None,
             },
             cons,
         )
@@ -1160,9 +1230,11 @@ mod tests {
             48_000,
             16_000,
             64,
+            None,
             gap_generation.clone(),
             stop.clone(),
             failed.clone(),
+            Arc::new(Mutex::new(None)),
         )
         .unwrap();
         let capture = Capture {
@@ -1238,6 +1310,7 @@ mod tests {
                 underruns: Arc::new(AtomicU64::new(0)),
                 stop,
                 failed,
+                echo_reference: None,
             },
             dev_cons,
         )
@@ -1384,7 +1457,7 @@ mod tests {
         let mut cfg = AudioConfig::default();
         cfg.block_frames = 0;
         assert!(
-            Capture::start(&cfg, Box::new(|_| panic!("must not capture")))
+            Capture::start(&cfg, None, Box::new(|_| panic!("must not capture")))
                 .err()
                 .unwrap()
                 .to_string()
@@ -1397,9 +1470,11 @@ mod tests {
             48_000,
             16_000,
             0,
+            None,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false))
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None))
         )
         .is_err());
     }

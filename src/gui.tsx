@@ -89,6 +89,15 @@ export default Plugin.define({
       } else await start();
       await audio.attach({ sessionID: session.id }, { signal: ctx.signal });
     };
+    const detachCurrent = async () => {
+      const session = ctx.sessions.current();
+      if (!session) throw new Error("Open the session you want to stop talking to first");
+      const live = audio.state();
+      if (!live?.sessionID) throw new Error("Converse is not running");
+      if (live.serverID !== session.server.id)
+        throw new Error("This session is on a different server than the conversation");
+      await audio.detach({ sessionID: session.id }, { signal: ctx.signal });
+    };
     const open = () => {
       const state = audio.state();
       if (state?.serverID && state.sessionID)
@@ -325,6 +334,7 @@ export default Plugin.define({
         run: () => attempt(() => audio.pause({ paused: audio.state()?.paused !== true })),
       },
       { id: "attach", title: "talk to this session", run: () => attempt(attachCurrent) },
+      { id: "detach", title: "stop talking to this session", run: () => attempt(detachCurrent) },
       { id: "open", title: "open supervisor session", run: open },
       { id: "details", title: "show conversation details", run: openDetails },
     ];

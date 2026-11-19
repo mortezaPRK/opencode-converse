@@ -19,13 +19,17 @@ The current SDK target is OpenCode **2.3.0**.
   client and adds terminal/Desktop controls.
 - The supervisor and worker sessions run on the selected OpenCode server. Audio
   and speech models stay local, including when that server is remote.
-- The plugin owns both agents it uses: a hidden `converse` supervisor and a
-  hidden `converse-worker` coding worker. Neither is selectable in normal agent
-  lists, and workers never fall back to an OpenCode-provided agent.
+- The voice agent always has its own session (a hidden `converse` supervisor)
+  and never owns other sessions. Sessions it creates default to a hidden
+  `converse-worker` agent, which is only their creation-time agent; no session
+  is ever branded, hidden, retitled, or switched to another agent.
 - English speech is the initial scope. Permission requests are announced, but
   approvals happen in OpenCode's normal interface.
 - The microphone starts only on an explicit command. Stopping a conversation
-  releases its local runtime. Use headphones while echo behavior is being tested.
+  releases its local runtime. Echo cancellation (`echoCancellation`, on by default)
+  lets you talk over the assistant on speakers, but it is verified only offline
+  (simulated echo) so far, not on real devices; if the assistant interrupts itself
+  or you cannot interrupt it, use headphones or set `echoCancellation: "off"`.
 
 ## Develop
 
@@ -107,6 +111,7 @@ from the command palette or run `/converse-start`.
 | `/converse-mute`    | Mute or unmute microphone capture                     |
 | `/converse-pause`   | Pause or resume spoken output                         |
 | `/converse-attach`  | Talk to the session you are viewing (starts if idle)  |
+| `/converse-detach`  | Stop talking to the session you are viewing           |
 | `/converse-open`    | Open the dedicated supervisor session                 |
 | `/converse-details` | Show the live transcript, activity, and controls      |
 
@@ -122,22 +127,30 @@ discards the held speech. If you cut a reply off, the transcript marks it
 unchanged). `endpointing` (`responsive` or `patient`) tunes how long the engine
 waits in silence before ending your turn; `acknowledgement` (`auto` or `off`)
 controls a short neutral spoken cue ("Okay.", "On it.") when the reply is slow to
-start; see [configuration](docs/configuration.md).
+start; `echoCancellation` (`on` or `off`) removes the assistant's own voice from
+the microphone; see [configuration](docs/configuration.md).
 
 The transcript (latest 50 entries) is kept by the voice bridge, not read from the
 host's session cache, so it shows your spoken prompts and the supervisor's
 completed replies even while you are viewing another session.
 
-Ask the supervisor to delegate a task, inspect one of its workers, steer it, or
-stop it. Say "start a plan session about X" to pick any visible OpenCode agent
-(`converse_list_agents`); without one, the hidden `converse-worker` is used.
-To work in an existing session, run `/converse-attach` while viewing it, or ask
+Ask the supervisor to delegate a task, inspect a session it follows, steer it, or
+interrupt it. Say "start a plan session about X" and it creates a new session with
+that visible OpenCode agent (`converse_list_agents`); without one, the hidden
+`converse-worker` agent is used. An existing session's agent is never changed.
+To talk to an existing session, run `/converse-attach` while viewing it, or ask
 the supervisor to attach one from `converse_list_sessions`. Only sessions at the
 conversation's own location can be attached, never supervisor sessions or
-sessions held by another active conversation; attaching sends nothing, and
-agent changes apply only when you ask for them. Attached sessions are prompted,
-followed, and announced like any worker, and permission requests stay on screen. It reports worker updates while you are listening. Worker permission
-requests must be decided on screen. If a server connection drops, start a new
+sessions another active conversation already follows. The voice agent never
+owns a session: attaching only reads it and records it in the plugin's own
+storage, sending nothing and changing no metadata, title, or agent. Followed
+sessions (attached or created) can be prompted, interrupted, and announced, and
+up to 16 can be followed at once. `/converse-detach` (or asking the supervisor)
+stops following a session; this leaves the session and any running work
+untouched, and stopping the conversation detaches everything. Sessions that
+earlier versions marked with `converse:worker` metadata are not treated as
+followed. The supervisor reports updates for followed sessions while you are
+listening. Permission requests must be decided on screen. If a server connection drops, start a new
 conversation explicitly; user prompts are not automatically replayed.
 Long replies are shortened for speech; the full response remains available in
 the supervisor session.
@@ -154,7 +167,7 @@ The engine and speech-model locations are fixed under the app state folder.
 There is no engine, data, or model path option and no `CONVERSE_BIN` override.
 The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
-versions. `asrThreads`, `ttsThreads`, `endpointing`, and `acknowledgement` are the only runtime tuning
+versions. `asrThreads`, `ttsThreads`, `endpointing`, `acknowledgement`, and `echoCancellation` are the only runtime tuning
 options. OpenCode owns provider credentials; they are never passed to the Rust
 process. Device preferences stay in host storage.
 
