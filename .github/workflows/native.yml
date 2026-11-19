@@ -1,29 +1,111 @@
-name: Native build gate
+name: Native build
 
 on:
   workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - native/**
+      - .github/workflows/native.yml
+      - package.json
+      - package-lock.json
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   native:
+    name: engine-${{ matrix.target }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+            exe: opencode-converse
+          - os: ubuntu-24.04
+            target: linux-x64
+            exe: opencode-converse
+          - os: windows-latest
+            target: win32-x64
+            exe: opencode-converse.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: native
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libclang-dev cmake pkg-config
-      - if: runner.os == 'Windows'
-        run: choco install llvm cmake --yes --no-progress
-      - run: node native/scripts/build.mjs
+          key: ${{ matrix.target }}
+      - name: Install meson and ninja
+        run: brew install meson ninja
+        if: runner.os == 'macOS'
+      - name: Install meson and ninja
+        run: python3 -m pip install --user meson ninja
+        if: runner.os == 'Linux'
+      - name: Install meson and ninja
+        run: python -m pip install meson ninja
+        if: runner.os == 'Windows'
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev pkg-config cmake
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - name: Windows libclang
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install llvm --yes --no-progress --limit-output || true
+          echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      # A release workflow can add a pre-build step here (for example version stamping).
+      - name: Build engine
+        if: runner.os != 'Windows'
+        run: node native/scripts/build.mjs
+      - name: Build engine (MSVC)
+        if: runner.os == 'Windows'
+        env:
+          CC: cl
+          CXX: cl
+          CARGO_TARGET_DIR: C:\t
+        run: node native/scripts/build.mjs
+      - name: Stage executable
+        shell: bash
+        run: |
+          mkdir -p dist
+          bin="native/target/release"
+          if [ "${{ runner.os }}" = Windows ]; then bin="/c/t/release"; fi
+          cp "$bin/${{ matrix.exe }}" "dist/${{ matrix.exe }}"
+          ls -l dist
+          echo "### ${{ matrix.target }} binary size" >> "$GITHUB_STEP_SUMMARY"
+          wc -c < "dist/${{ matrix.exe }}" | awk '{printf "%s bytes (%.1f MiB)\n", $1, $1/1048576}' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Smoke test
+        shell: bash
+        run: ./dist/${{ matrix.exe }} --version
+      - name: Dynamic dependencies
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux) ldd dist/${{ matrix.exe }} ;;
+            macOS) otool -L dist/${{ matrix.exe }} ;;
+            Windows) "$(vswhere -latest -find 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe' | head -1)" //dependents dist/${{ matrix.exe }} || true ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-${{ matrix.target }}
+          path: dist/${{ matrix.exe }}
+          retention-days: 7
+          if-no-files-found: error

@@ -21,10 +21,25 @@ or `pip install meson`) and libclang (Xcode command line tools on macOS) for the
 bundled WebRTC audio processing build (`webrtc-audio-processing` `bundled`, about 40 s).
 Meson downloads the pinned abseil-cpp 20240722.0 source (and its wrapdb build patch)
 from github.com during that build, so the first build needs network access; Linux/Windows
-builds of this dependency have not been verified. Linux additionally needs ALSA development headers and
+builds of this dependency are built in CI (`.github/workflows/native.yml`). Linux additionally needs ALSA development headers and
 pkg-config. Speech recognition (Moonshine) and the VAD/turn models run on CPU through the
 shared ONNX Runtime on every platform. macOS has
 a minimum deployment target of 13.4 for the downloaded ONNX Runtime archive.
+
+### Per-OS build notes
+
+- meson and ninja: `brew install meson ninja` (macOS), `pip install meson ninja` (Linux, Windows).
+- Linux: `libasound2-dev libclang-dev pkg-config cmake`. The prebuilt ONNX Runtime needs
+  glibc >= 2.38 and libstdc++ from GCC 13, so CI builds on Ubuntu 24.04 and the engine requires
+  glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+). At runtime ALSA (`libasound2`) must be installed.
+- Windows: run from a Visual Studio developer environment with `CC=cl CXX=cl` so meson does not
+  pick MinGW, plus libclang (LLVM). Use a short target dir (for example `CARGO_TARGET_DIR=C:\t`):
+  abseil's paths exceed MAX_PATH otherwise. `webrtc-audio-processing-sys` is patched locally
+  (`native/vendor/`, see its `README.opencode.md`) because upstream 2.1.0 does not build with MSVC.
+- Windows C runtime: dynamic (`/MD`) everywhere. Pyke's prebuilt ONNX Runtime for
+  `x86_64-pc-windows-msvc` is compiled with `RuntimeLibrary=MD_DynamicRelease` and enforces it with
+  `/FAILIFMISMATCH`, so a static CRT cannot link. Users need the Microsoft Visual C++ Redistributable
+  (x64); the prebuilt ONNX Runtime also links DirectML (`DirectML.dll`, part of Windows 10 1903+).
 
 ## Offline speech listening comparison
 
