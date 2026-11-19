@@ -1,4 +1,4 @@
-use crate::protocol::{Engine, Host, Reason, Status, MAX_TEXT_BYTES};
+use crate::protocol::{Engine, Host, Participant, Reason, Status, MAX_TEXT_BYTES};
 use crate::speech::Speech;
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -19,9 +19,25 @@ pub enum Action {
     Pause(bool),
     /// Play the cached acknowledgement phrase with this index, on the current generation.
     Ack(usize),
+    /// Voice for every following `Speak`/`Ack` until the next `Cancel`, which resets it to
+    /// `default`. Only emitted when it differs from the voice already in force.
+    Voice(String),
+}
+
+/// Replies from other speakers waiting for the floor. Bounded by count and bytes.
+const QUEUE_MAX_ITEMS: usize = 8;
+const QUEUE_MAX_BYTES: usize = 64 * 1024;
+
+struct Queued {
+    turn: u64,
+    speaker: usize,
+    id: String,
+    text: String,
+    final_: bool,
 }
 
 struct Reply {
+    speaker: usize,
     id: String,
     raw: String,
     speech: Speech,
@@ -40,7 +56,7 @@ pub struct Controller {
     finished: HashSet<String>,
     playing: bool,
     announcing: bool,
-    announcements: VecDeque<(String, String)>,
+    announcements: VecDeque<(usize, String, String)>,
     seen_announcements: VecDeque<String>,
     status: Status,
     speech_chunks: usize,
@@ -50,6 +66,17 @@ pub struct Controller {
     pub ack_enabled: bool,
     ack_armed: Option<Instant>,
     ack_next: usize,
+    roster: Vec<Participant>,
+    /// Who the current turn was addressed to; the ack and "thinking" status are theirs.
+    addressee: usize,
+    /// Whose voice the audio in flight uses.
+    speaking_as: usize,
+    /// Voice the backend currently has in force (reset to `default` by every `Cancel`).
+    voice: String,
+    /// Replies from non-floor speakers, promoted in order once the floor is free.
+    queue: VecDeque<Queued>,
+    queue_bytes: usize,
+    status_speaker: Option<usize>,
 }
 
 impl Default for Controller {
@@ -73,11 +100,57 @@ impl Default for Controller {
             ack_enabled: false,
             ack_armed: None,
             ack_next: 0,
+            roster: vec![Participant::implicit()],
+            addressee: 0,
+            speaking_as: 0,
+            voice: "default".into(),
+            queue: VecDeque::new(),
+            queue_bytes: 0,
+            status_speaker: None,
         }
     }
 }
 
 impl Controller {
+    /// Fix the roster for this conversation. Called once, before anything is spoken.
+    pub fn set_roster(&mut self, roster: Vec<Participant>) {
+        if !roster.is_empty() {
+            self.roster = roster;
+        }
+    }
+    fn index_of(&self, id: &str) -> Result<usize, &'static str> {
+        self.roster
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or("Unknown speaker")
+    }
+    fn id_of(&self, index: usize) -> String {
+        self.roster[index].id.clone()
+    }
+    /// The participant the user would hear (or be waiting on) right now.
+    fn current_speaker(&self) -> usize {
+        match &self.reply {
+            Some(reply) => reply.speaker,
+            None if self.playing => self.speaking_as,
+            None => self.addressee,
+        }
+    }
+    fn use_voice(&mut self, speaker: usize, actions: &mut Vec<Action>) {
+        self.speaking_as = speaker;
+        let voice = &self.roster[speaker].voice;
+        if *voice != self.voice {
+            self.voice = voice.clone();
+            actions.push(Action::Voice(self.voice.clone()));
+        }
+    }
+    fn push_cancel(&mut self, actions: &mut Vec<Action>) {
+        actions.push(Action::Cancel);
+        self.voice = "default".into();
+    }
+    fn clear_queue(&mut self) {
+        self.queue.clear();
+        self.queue_bytes = 0;
+    }
     fn speak(
         &mut self,
         chunks: Vec<String>,
@@ -97,6 +170,7 @@ impl Controller {
             .into_iter()
             .take(LIMIT.saturating_sub(self.speech_chunks))
         {
+            self.use_voice(self.speaking_as, actions);
             actions.push(Action::Speak(chunk));
             self.speech_chunks += 1;
             self.playing = true;
@@ -108,14 +182,24 @@ impl Controller {
         }
     }
     fn clipping_notice(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+        self.use_voice(self.speaking_as, actions);
         actions.push(Action::Speak("The rest is on screen.".into()));
         self.playing = true;
         self.status(Status::Speaking, out);
     }
     fn status(&mut self, status: Status, out: &mut Vec<Engine>) {
-        if self.status != status {
+        let speaker = match status {
+            Status::Thinking => Some(self.addressee),
+            Status::Speaking => Some(self.speaking_as),
+            _ => None,
+        };
+        if self.status != status || self.status_speaker != speaker {
             self.status = status;
-            out.push(Engine::Status { state: status });
+            self.status_speaker = speaker;
+            out.push(Engine::Status {
+                state: status,
+                speaker: speaker.map(|index| self.id_of(index)),
+            });
         }
     }
     fn rest(&mut self, out: &mut Vec<Engine>) {
@@ -131,7 +215,8 @@ impl Controller {
         );
     }
     fn cancel(&mut self, actions: &mut Vec<Action>) {
-        actions.push(Action::Cancel);
+        self.push_cancel(actions);
+        self.clear_queue();
         self.reply = None;
         self.playing = false;
         self.announcing = false;
@@ -158,6 +243,7 @@ impl Controller {
         {
             return;
         }
+        self.use_voice(self.addressee, actions);
         actions.push(Action::Ack(self.ack_next));
         self.ack_next = (self.ack_next + 1) % ACK_PHRASES.len();
     }
@@ -179,13 +265,14 @@ impl Controller {
         {
             return;
         }
-        while let Some((_id, text)) = self.announcements.pop_front() {
+        while let Some((speaker, _id, text)) = self.announcements.pop_front() {
             let chunks = Speech::default().push(&text, true);
             if chunks.is_empty() {
                 continue;
             }
             // New generation makes a duplicate/stale drained event harmless.
-            actions.push(Action::Cancel);
+            self.push_cancel(actions);
+            self.speaking_as = speaker;
             self.speech_chunks = 0;
             self.speech_clipped = false;
             // Host-side UTF-8 clipping may leave up to three bytes of slack.
@@ -211,6 +298,7 @@ impl Controller {
         if self.active {
             out.push(Engine::Interrupt {
                 turn: self.turn,
+                speaker: Some(self.id_of(self.current_speaker())),
                 played_ms: None,
                 generated_ms: None,
                 heard: None,
@@ -245,6 +333,9 @@ impl Controller {
             self.schedule_announcement(out, actions);
             return;
         }
+        let resolved = crate::addressing::resolve(&self.roster, &text);
+        self.addressee = resolved.index;
+        self.speaking_as = resolved.index;
         self.turn += 1;
         self.active = true;
         self.ack_armed = self.ack_enabled.then(Instant::now);
@@ -253,15 +344,19 @@ impl Controller {
         self.speech_clipped = false;
         out.push(Engine::Prompt {
             turn: self.turn,
-            text,
+            speaker: self.id_of(resolved.index),
+            addressed: resolved.addressed,
+            text: resolved.text,
         });
         self.status(Status::Thinking, out);
     }
     pub fn drained(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         self.playing = false;
         self.announcing = false;
+        // The next queued speaker takes the floor without a listening flicker in between.
+        let promoted = self.promote(out, actions);
         // A later user utterance must not be overwritten by a prior speech completion.
-        if self.hearing.is_none() {
+        if !promoted && self.hearing.is_none() {
             self.rest(out);
         }
         self.schedule_announcement(out, actions);
@@ -284,6 +379,7 @@ impl Controller {
                     if self.active {
                         out.push(Engine::Interrupt {
                             turn: self.turn,
+                            speaker: Some(self.id_of(self.current_speaker())),
                             played_ms: None,
                             generated_ms: None,
                             heard: None,
@@ -308,13 +404,30 @@ impl Controller {
                     self.schedule_announcement(out, actions);
                 }
             }
-            Host::ReplyDelta { turn, reply, text } => {
-                self.reply(turn, reply, text, false, out, actions)?
+            Host::ReplyDelta {
+                turn,
+                speaker,
+                reply,
+                text,
+            } => {
+                let speaker = self.index_of(&speaker)?;
+                self.reply(turn, speaker, reply, text, false, out, actions)?
             }
-            Host::ReplyEnd { turn, reply, text } => {
-                self.reply(turn, reply, text, true, out, actions)?
+            Host::ReplyEnd {
+                turn,
+                speaker,
+                reply,
+                text,
+            } => {
+                let speaker = self.index_of(&speaker)?;
+                self.reply(turn, speaker, reply, text, true, out, actions)?
             }
-            Host::Announcement { reply, text } => {
+            Host::Announcement {
+                speaker,
+                reply,
+                text,
+            } => {
+                let speaker = self.index_of(&speaker)?;
                 if self.seen_announcements.contains(&reply) {
                     return Ok(());
                 }
@@ -329,7 +442,7 @@ impl Controller {
                     self.announcements.pop_front();
                 }
                 let text = clip(&text, 8192).to_owned();
-                self.announcements.push_back((reply, text));
+                self.announcements.push_back((speaker, reply, text));
                 self.schedule_announcement(out, actions);
             }
             Host::TurnEnd { turn, reason } => {
@@ -364,6 +477,8 @@ impl Controller {
                 self.active = false;
                 if reason != Reason::Completed {
                     self.rest(out);
+                } else if !self.playing {
+                    let _ = self.promote(out, actions);
                 }
             }
             Host::PromptFailed { turn, message } => {
@@ -387,9 +502,64 @@ impl Controller {
         self.speak(reply.speech.push("", true), false, out, actions);
         self.finished.insert(reply.id);
     }
+    /// Whoever holds the floor: the speaker of the reply being streamed, or of audio that is
+    /// still playing. `None` when the floor is free.
+    fn floor_holder(&self) -> Option<usize> {
+        match &self.reply {
+            Some(reply) => Some(reply.speaker),
+            None if self.playing => Some(self.speaking_as),
+            None => None,
+        }
+    }
+    fn enqueue(&mut self, item: Queued) {
+        if self.queue.len() >= QUEUE_MAX_ITEMS
+            || self.queue_bytes.saturating_add(item.text.len()) > QUEUE_MAX_BYTES
+        {
+            return;
+        }
+        self.queue_bytes += item.text.len();
+        self.queue.push_back(item);
+    }
+    /// Give the floor to the next queued speaker once the current one is done speaking.
+    /// Everything that speaker queued is replayed in order on a fresh generation.
+    fn promote(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) -> bool {
+        if self.playing || self.reply.is_some() || self.muted || self.paused || !self.ready {
+            return false;
+        }
+        let Some(first) = self.queue.front().map(|item| item.speaker) else {
+            return false;
+        };
+        let (mine, rest): (VecDeque<_>, VecDeque<_>) =
+            self.queue.drain(..).partition(|item| item.speaker == first);
+        self.queue = rest;
+        self.queue_bytes = self.queue.iter().map(|item| item.text.len()).sum();
+        self.push_cancel(actions);
+        self.speaking_as = first;
+        self.speech_chunks = 0;
+        self.speech_clipped = false;
+        let mut finished = false;
+        for item in mine {
+            finished = item.final_;
+            let _ = self.accept(
+                item.turn,
+                item.speaker,
+                item.id,
+                item.text,
+                item.final_,
+                out,
+                actions,
+            );
+        }
+        if finished {
+            actions.push(Action::Finish);
+        }
+        true
+    }
+    #[allow(clippy::too_many_arguments)]
     fn reply(
         &mut self,
         turn: u64,
+        speaker: usize,
         id: String,
         text: String,
         final_: bool,
@@ -404,6 +574,30 @@ impl Controller {
         {
             return Ok(());
         }
+        if self.floor_holder().is_some_and(|holder| holder != speaker) {
+            self.enqueue(Queued {
+                turn,
+                speaker,
+                id,
+                text,
+                final_,
+            });
+            return Ok(());
+        }
+        self.accept(turn, speaker, id, text, final_, out, actions)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn accept(
+        &mut self,
+        _turn: u64,
+        speaker: usize,
+        id: String,
+        text: String,
+        final_: bool,
+        out: &mut Vec<Engine>,
+        actions: &mut Vec<Action>,
+    ) -> Result<(), &'static str> {
+        self.speaking_as = speaker;
         if self.reply.as_ref().is_some_and(|r| r.id != id) {
             // Superseding a reply invalidates queued chunks, not just future deltas.
             let old_id = self.reply.as_ref().unwrap().id.clone();
@@ -422,6 +616,7 @@ impl Controller {
             return Ok(());
         }
         let reply = self.reply.get_or_insert_with(|| Reply {
+            speaker,
             id,
             raw: String::new(),
             speech: Speech::default(),
@@ -495,6 +690,7 @@ mod tests {
             c.ready(&mut out, &mut actions);
             c.host(
                 Host::Announcement {
+                    speaker: "a1".into(),
                     reply: "a".into(),
                     text,
                 },
@@ -555,6 +751,7 @@ mod tests {
         c.hearing(1, &mut out, &mut actions);
         c.host(
             Host::Announcement {
+                speaker: "a1".into(),
                 reply: "a".into(),
                 text: "A worker finished.".into(),
             },
@@ -582,6 +779,7 @@ mod tests {
         .unwrap();
         c.host(
             Host::Announcement {
+                speaker: "a1".into(),
                 reply: "a".into(),
                 text: "A worker finished.".into(),
             },
@@ -613,6 +811,7 @@ mod tests {
         c.host(
             Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "replacement".into(),
                 text: "short".into(),
             },
@@ -638,12 +837,14 @@ mod tests {
         let message = if final_ {
             Host::ReplyEnd {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "r".into(),
                 text: text.into(),
             }
         } else {
             Host::ReplyDelta {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "r".into(),
                 text: text.into(),
             }
@@ -702,6 +903,7 @@ mod tests {
         c.host(
             Host::ReplyEnd {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "r".into(),
                 text: "A spoken reply.".into(),
             },
@@ -747,6 +949,7 @@ mod tests {
         c.host(
             Host::ReplyEnd {
                 turn: 1,
+                speaker: "a1".into(),
                 reply: "r".into(),
                 text: "Held speech.".into(),
             },
@@ -778,6 +981,7 @@ mod tests {
         a.clear();
         c.host(
             Host::Announcement {
+                speaker: "a1".into(),
                 reply: "a".into(),
                 text: "A worker update.".into(),
             },
@@ -812,6 +1016,7 @@ mod tests {
         for i in 0..1000 {
             c.host(
                 Host::Announcement {
+                    speaker: "a1".into(),
                     reply: format!("a-{i}"),
                     text: "A worker update.".into(),
                 },
@@ -987,6 +1192,7 @@ mod tests {
         c.ready(&mut out, &mut a);
         c.host(
             Host::Announcement {
+                speaker: "a1".into(),
                 reply: "w".into(),
                 text: "A worker finished.".into(),
             },
@@ -997,5 +1203,198 @@ mod tests {
         assert!(a.iter().any(|x| matches!(x, Action::Speak(_))));
         assert!(c.armed_at().is_none());
         assert!(due(&mut c).is_empty());
+    }
+
+    fn roster() -> Vec<Participant> {
+        [
+            ("a1", "Ada", "zoey"),
+            ("a2", "Grace", "easton"),
+            ("a3", "Linus", "default"),
+        ]
+        .into_iter()
+        .map(|(id, name, voice)| Participant {
+            id: id.into(),
+            name: name.into(),
+            voice: voice.into(),
+        })
+        .collect()
+    }
+    fn team() -> Controller {
+        let mut c = Controller::default();
+        c.set_roster(roster());
+        c.ready(&mut vec![], &mut vec![]);
+        c
+    }
+    fn say(
+        c: &mut Controller,
+        speaker: &str,
+        reply: &str,
+        text: &str,
+        final_: bool,
+    ) -> Vec<Action> {
+        let mut a = vec![];
+        let message = if final_ {
+            Host::ReplyEnd {
+                turn: 1,
+                speaker: speaker.into(),
+                reply: reply.into(),
+                text: text.into(),
+            }
+        } else {
+            Host::ReplyDelta {
+                turn: 1,
+                speaker: speaker.into(),
+                reply: reply.into(),
+                text: text.into(),
+            }
+        };
+        c.host(message, &mut vec![], &mut a).unwrap();
+        a
+    }
+    fn prompt(c: &mut Controller, text: &str) -> (Vec<Engine>, Vec<Action>) {
+        let mut out = vec![];
+        let mut a = vec![];
+        c.hearing(1, &mut out, &mut a);
+        c.transcript(1, text.into(), &mut out, &mut a);
+        (out, a)
+    }
+    #[test]
+    fn prompt_is_addressed_stripped_and_defaults_to_the_first_agent() {
+        let mut c = team();
+        let (out, _) = prompt(&mut c, "Grace, check the build.");
+        assert!(
+            matches!(&out[..], [.., Engine::Prompt { speaker, addressed: true, text, .. }, _] if speaker == "a2" && text == "check the build.")
+        );
+        let mut c = team();
+        let (out, _) = prompt(&mut c, "What is the status?");
+        assert!(out.iter().any(|e| matches!(e, Engine::Prompt { speaker, addressed: false, text, .. } if speaker == "a1" && text == "What is the status?")));
+        assert!(out.iter().any(|e| matches!(e, Engine::Status { state: Status::Thinking, speaker: Some(s) } if s == "a1")));
+    }
+    #[test]
+    fn each_speaker_is_spoken_in_its_own_voice_and_default_stays_silent_on_the_wire() {
+        let mut c = team();
+        prompt(&mut c, "Ada, hello");
+        assert_eq!(
+            say(&mut c, "a1", "r", "Hi there.", true),
+            [
+                Action::Voice("zoey".into()),
+                Action::Speak("Hi there.".into())
+            ]
+        );
+        // A later turn spoken by a default-voice agent needs no voice action after Cancel.
+        let mut c = team();
+        prompt(&mut c, "Linus, hello");
+        assert_eq!(
+            say(&mut c, "a3", "r", "Hi there.", true),
+            [Action::Speak("Hi there.".into())]
+        );
+    }
+    #[test]
+    fn the_acknowledgement_uses_the_addressees_voice() {
+        let mut c = team();
+        c.ack_enabled = true;
+        prompt(&mut c, "Grace, run it");
+        let mut a = vec![];
+        c.poll_ack(c.armed_at().unwrap() + ACK_DELAY, &mut a);
+        assert_eq!(a, [Action::Voice("easton".into()), Action::Ack(0)]);
+    }
+    #[test]
+    fn another_speaker_waits_for_the_floor_then_speaks_in_order() {
+        let mut c = team();
+        prompt(&mut c, "Ada, hello");
+        say(&mut c, "a1", "r1", "Ada speaks first. ", false);
+        // Grace has to wait: nothing is synthesized for her yet.
+        assert!(say(&mut c, "a2", "r2", "Grace waits her turn.", true).is_empty());
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::TurnEnd {
+                turn: 1,
+                reason: Reason::Completed,
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert!(!a
+            .iter()
+            .any(|x| matches!(x, Action::Speak(t) if t.contains("Grace"))));
+        // Ada's audio drains: Grace takes the floor on a fresh generation in her voice.
+        let mut a = vec![];
+        c.drained(&mut out, &mut a);
+        assert_eq!(
+            a,
+            [
+                Action::Cancel,
+                Action::Voice("easton".into()),
+                Action::Speak("Grace waits her turn.".into()),
+                Action::Finish
+            ]
+        );
+        assert!(out.iter().any(|e| matches!(e, Engine::Status { state: Status::Speaking, speaker: Some(s) } if s == "a2")));
+    }
+    #[test]
+    fn user_speech_cancels_active_and_queued_speakers() {
+        let mut c = team();
+        prompt(&mut c, "Ada, hello");
+        say(&mut c, "a1", "r1", "Ada speaks. ", false);
+        say(&mut c, "a2", "r2", "Grace is queued.", true);
+        let mut out = vec![];
+        let mut a = vec![];
+        c.hearing(2, &mut out, &mut a);
+        assert!(a.contains(&Action::Cancel));
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, Engine::Interrupt { speaker: Some(s), .. } if s == "a1")));
+        c.drained(&mut out, &mut a);
+        assert!(!a
+            .iter()
+            .any(|x| matches!(x, Action::Speak(t) if t.contains("Grace"))));
+    }
+    #[test]
+    fn the_floor_queue_is_bounded() {
+        let mut c = team();
+        prompt(&mut c, "Ada, hello");
+        say(&mut c, "a1", "r1", "Ada speaks. ", false);
+        for i in 0..50 {
+            say(&mut c, "a2", &format!("q{i}"), &"x ".repeat(4000), false);
+        }
+        assert!(c.queue.len() <= QUEUE_MAX_ITEMS && c.queue_bytes <= QUEUE_MAX_BYTES);
+    }
+    #[test]
+    fn announcements_are_spoken_by_the_named_speaker() {
+        let mut c = team();
+        let mut out = vec![];
+        let mut a = vec![];
+        c.host(
+            Host::Announcement {
+                speaker: "a2".into(),
+                reply: "x".into(),
+                text: "The build finished.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            [
+                Action::Cancel,
+                Action::Voice("easton".into()),
+                Action::Speak("The build finished.".into()),
+                Action::Finish
+            ]
+        );
+        assert!(c
+            .host(
+                Host::Announcement {
+                    speaker: "zz".into(),
+                    reply: "y".into(),
+                    text: "x".into()
+                },
+                &mut out,
+                &mut a
+            )
+            .is_err());
     }
 }

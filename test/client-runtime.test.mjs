@@ -57,12 +57,16 @@ function setup(extra = {}) {
   return { proc, runtime, messages, errors };
 }
 
+const DEFAULT_ROSTER = [{ id: "a1", name: "Converse", voice: "default" }];
+
 test("runtime sends only protocol init and local device preferences", async () => {
   const { proc, runtime, messages } = setup();
   proc.stdout.write('{"type":"hello","pro');
-  proc.stdout.write('tocol":1}\n');
+  proc.stdout.write('tocol":2}\n');
   await runtime.ready;
-  assert.deepEqual(proc.frames, [{ type: "init", protocol: 1, settings: { inputDevice: "mic" } }]);
+  assert.deepEqual(proc.frames, [
+    { type: "init", protocol: 2, settings: { inputDevice: "mic", participants: DEFAULT_ROSTER } },
+  ]);
   proc.frame({ type: "status", state: "listening" });
   assert.deepEqual(messages, [{ type: "status", state: "listening" }]);
   runtime.send({ type: "mute", on: true });
@@ -78,16 +82,17 @@ test("runtime sends configured inference tuning over init", async () => {
   const { proc, runtime } = setup({
     runtime: { asrThreads: 2, ttsThreads: 3 },
   });
-  proc.frame({ type: "hello", protocol: 1 });
+  proc.frame({ type: "hello", protocol: 2 });
   await runtime.ready;
   assert.deepEqual(proc.frames, [
     {
       type: "init",
-      protocol: 1,
+      protocol: 2,
       settings: {
         inputDevice: "mic",
         asrThreads: 2,
         ttsThreads: 3,
+        participants: DEFAULT_ROSTER,
       },
     },
   ]);
@@ -96,7 +101,7 @@ test("runtime sends configured inference tuning over init", async () => {
 
 test("runtime sends endpointing over init", async () => {
   const { proc, runtime } = setup({ runtime: { endpointing: "patient" } });
-  proc.frame({ type: "hello", protocol: 1 });
+  proc.frame({ type: "hello", protocol: 2 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.endpointing, "patient");
   await runtime.stop();
@@ -104,7 +109,7 @@ test("runtime sends endpointing over init", async () => {
 
 test("runtime sends echoCancellation over init", async () => {
   const { proc, runtime } = setup({ runtime: { echoCancellation: "off" } });
-  proc.frame({ type: "hello", protocol: 1 });
+  proc.frame({ type: "hello", protocol: 2 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.echoCancellation, "off");
   await runtime.stop();
@@ -112,7 +117,7 @@ test("runtime sends echoCancellation over init", async () => {
 
 test("runtime sends acknowledgement over init", async () => {
   const { proc, runtime } = setup({ runtime: { acknowledgement: "off" } });
-  proc.frame({ type: "hello", protocol: 1 });
+  proc.frame({ type: "hello", protocol: 2 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.acknowledgement, "off");
   await runtime.stop();
@@ -121,15 +126,18 @@ test("runtime sends acknowledgement over init", async () => {
 test("runtimeSettings contains only inference tuning", () => {
   assert.deepEqual(runtimeSettings({ asrThreads: 2 }), {
     asrThreads: 2,
+    participants: DEFAULT_ROSTER,
   });
 });
 
 test("fragmented valid stdout frames are concatenated at most once per completed frame", async (t) => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 1 });
+  s.proc.frame({ type: "hello", protocol: 2 });
   await s.runtime.ready;
   const text = "x".repeat(MAX_FRAME_BYTES - 100);
-  const frame = Buffer.from(JSON.stringify({ type: "prompt", turn: 1, text }) + "\n");
+  const frame = Buffer.from(
+    JSON.stringify({ type: "prompt", turn: 1, speaker: "a1", addressed: false, text }) + "\n",
+  );
   let concatenations = 0;
   let copied = 0;
   const original = Buffer.concat;
@@ -157,9 +165,11 @@ test("fragmented valid stdout frames are concatenated at most once per completed
 
 test("stdout chunk accumulation preserves split UTF-8 and coalesced frame suffixes", async () => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 1 });
+  s.proc.frame({ type: "hello", protocol: 2 });
   await s.runtime.ready;
-  const first = Buffer.from('{"type":"prompt","turn":1,"text":"€😀"}\n');
+  const first = Buffer.from(
+    '{"type":"prompt","turn":1,"speaker":"a1","addressed":false,"text":"€😀"}\n',
+  );
   const split = first.indexOf(Buffer.from("😀")) + 1;
   s.proc.stdout.write(first.subarray(0, split));
   s.proc.stdout.write(
@@ -167,7 +177,7 @@ test("stdout chunk accumulation preserves split UTF-8 and coalesced frame suffix
   );
   s.proc.stdout.write('"thinking"}\n');
   assert.deepEqual(s.messages, [
-    { type: "prompt", turn: 1, text: "€😀" },
+    { type: "prompt", turn: 1, speaker: "a1", addressed: false, text: "€😀" },
     { type: "status", state: "thinking" },
   ]);
   assert.deepEqual(s.errors, []);
@@ -177,7 +187,7 @@ test("stdout chunk accumulation preserves split UTF-8 and coalesced frame suffix
 test("stop waits for confirmed close after SIGKILL and rejects unconfirmed termination", async () => {
   for (const outcome of ["delayed", "false", "throw", "no-close"]) {
     const s = setup({ shutdownTimeoutMs: 5, killTimeoutMs: 50 });
-    s.proc.frame({ type: "hello", protocol: 1 });
+    s.proc.frame({ type: "hello", protocol: 2 });
     await s.runtime.ready;
     let signalled;
     const signal = new Promise((resolve) => {
@@ -212,7 +222,7 @@ test("stop waits for confirmed close after SIGKILL and rejects unconfirmed termi
 
 test("failed kill remains blocking until late close makes a later stop successful", async () => {
   const s = setup({ shutdownTimeoutMs: 2, killTimeoutMs: 2 });
-  s.proc.frame({ type: "hello", protocol: 1 });
+  s.proc.frame({ type: "hello", protocol: 2 });
   await s.runtime.ready;
   s.proc.kill = () => false;
   await assert.rejects(s.runtime.stop(), /termination is unconfirmed/);
@@ -224,14 +234,15 @@ test("failed kill remains blocking until late close makes a later stop successfu
 test("outbound strings are bounded before JSON serialization or buffer allocation", async (t) => {
   for (const field of ["text", "reply", "settings"]) {
     const s = setup();
-    s.proc.frame({ type: "hello", protocol: 1 });
+    s.proc.frame({ type: "hello", protocol: 2 });
     await s.runtime.ready;
     const huge = "x".repeat(MAX_FRAME_BYTES * 8);
     const message =
       field === "settings"
-        ? { type: "init", protocol: 1, settings: { inputDevice: huge } }
+        ? { type: "init", protocol: 2, settings: { inputDevice: huge } }
         : {
             type: "reply_end",
+            speaker: "a1",
             turn: 1,
             reply: field === "reply" ? huge : "r",
             text: field === "text" ? huge : "ok",
@@ -252,10 +263,11 @@ test("outbound strings are bounded before JSON serialization or buffer allocatio
 
 test("bounded control-heavy speech is substituted one-for-one before JSON escaping", async () => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 1 });
+  s.proc.frame({ type: "hello", protocol: 2 });
   await s.runtime.ready;
   s.runtime.send({
     type: "reply_end",
+    speaker: "a1",
     turn: 1,
     reply: "r",
     text: "\t\n\r" + "\u0001".repeat(200_000),
@@ -266,9 +278,9 @@ test("bounded control-heavy speech is substituted one-for-one before JSON escapi
 });
 
 for (const [name, frame, pattern] of [
-  ["version mismatch", '{"type":"hello","protocol":2}\n', /version mismatch/],
+  ["version mismatch", '{"type":"hello","protocol":1}\n', /version mismatch/],
   ["malformed JSON", "nope\n", /Unexpected|JSON/],
-  ["unknown fields", '{"type":"hello","protocol":1,"token":"secret"}\n', /version mismatch/],
+  ["unknown fields", '{"type":"hello","protocol":2,"token":"secret"}\n', /version mismatch/],
   ["wrong first message", '{"type":"status","state":"listening"}\n', /hello first/],
   ["oversized partial frame", "x".repeat(MAX_FRAME_BYTES + 1), /exceeds limit/],
   ["oversized terminated frame", "x".repeat(MAX_FRAME_BYTES + 1) + "\n", /exceeds limit/],
@@ -286,9 +298,9 @@ test("strict validator rejects coercions, invalid turns and extra settings", () 
     null,
     [],
     { type: "status", state: ["listening"] },
-    { type: "prompt", turn: 0, text: "a" },
-    { type: "prompt", turn: 1.1, text: "a" },
-    { type: "prompt", turn: 1, text: " " },
+    { type: "prompt", turn: 0, speaker: "a1", addressed: false, text: "a" },
+    { type: "prompt", turn: 1.1, speaker: "a1", addressed: false, text: "a" },
+    { type: "prompt", turn: 1, speaker: "a1", addressed: false, text: " " },
     { type: "interrupt", turn: 1, extra: true },
     { type: "interrupt", turn: 1, played_ms: 5 },
     { type: "interrupt", turn: 1, played_ms: 9, generated_ms: 5 },
@@ -330,7 +342,7 @@ test("local device settings use the native UTF-8 byte and Unicode-control contra
 
 test("runtime reports EOF after handshake without accepting more events", async () => {
   const { proc, runtime, errors } = setup();
-  proc.frame({ type: "hello", protocol: 1 });
+  proc.frame({ type: "hello", protocol: 2 });
   await runtime.ready;
   proc.stdout.end();
   await new Promise((resolve) => setImmediate(resolve));
@@ -351,7 +363,7 @@ test("runtime handles process errors and handshake deadline", async () => {
 for (const name of ["stdout", "stderr", "stdin"])
   test(`runtime handles ${name} stream errors as fatal`, async () => {
     const { proc, runtime, errors } = setup();
-    proc.frame({ type: "hello", protocol: 1 });
+    proc.frame({ type: "hello", protocol: 2 });
     await runtime.ready;
     proc[name].emit("error", new Error(`${name} failed`));
     assert.equal(errors.length, 1);
@@ -364,13 +376,14 @@ for (const name of ["stdout", "stderr", "stdin"])
 test("outbound oversized frames and blocked write queues fail and clean up without throwing", async () => {
   for (const blocked of [false, true]) {
     const { proc, runtime, errors } = setup();
-    proc.frame({ type: "hello", protocol: 1 });
+    proc.frame({ type: "hello", protocol: 2 });
     await runtime.ready;
     if (blocked)
       Object.defineProperty(proc.stdin, "writableLength", { value: MAX_FRAME_BYTES * 2 });
     assert.doesNotThrow(() =>
       runtime.send({
         type: "reply_delta",
+        speaker: "a1",
         turn: 1,
         reply: "assistant:0",
         text: blocked ? "a" : "a".repeat(MAX_FRAME_BYTES),
@@ -386,16 +399,16 @@ test("outbound oversized frames and blocked write queues fail and clean up witho
 
 test("graceful exit avoids kill; duplicate hello and invalid UTF-8 fail", async () => {
   const graceful = setup();
-  graceful.proc.frame({ type: "hello", protocol: 1 });
+  graceful.proc.frame({ type: "hello", protocol: 2 });
   await graceful.runtime.ready;
   const stopped = graceful.runtime.stop();
   graceful.proc.emit("close", 0, null);
   await stopped;
   assert.deepEqual(graceful.proc.kills, []);
   const duplicate = setup();
-  duplicate.proc.frame({ type: "hello", protocol: 1 });
+  duplicate.proc.frame({ type: "hello", protocol: 2 });
   await duplicate.runtime.ready;
-  duplicate.proc.frame({ type: "hello", protocol: 1 });
+  duplicate.proc.frame({ type: "hello", protocol: 2 });
   assert.match(duplicate.errors[0].message, /Duplicate/);
   await duplicate.runtime.stop();
   const invalid = setup();
@@ -531,4 +544,40 @@ test("runtime environment drops credentials and keeps state-folder inputs", () =
       PIPEWIRE_RUNTIME_DIR: "/run/user/1000/pipewire",
     },
   );
+});
+
+test("runtime sends the configured roster, assigning unused voices in order", async () => {
+  const { proc, runtime } = setup({
+    runtime: { agents: [{ name: "Ada", voice: "easton" }, { name: "Grace" }, { name: "Linus" }] },
+  });
+  proc.frame({ type: "hello", protocol: 2 });
+  await runtime.ready;
+  assert.deepEqual(proc.frames[0].settings.participants, [
+    { id: "a1", name: "Ada", voice: "easton" },
+    { id: "a2", name: "Grace", voice: "zoey" },
+    { id: "a3", name: "Linus", voice: "maeve" },
+  ]);
+  await runtime.stop();
+});
+
+test("engine frames carry validated speakers", async () => {
+  const { parseEngineMessage } = await import("../dist/client/runtime.js");
+  assert.deepEqual(parseEngineMessage({ type: "status", state: "speaking", speaker: "a2" }), {
+    type: "status",
+    state: "speaking",
+    speaker: "a2",
+  });
+  assert.deepEqual(parseEngineMessage({ type: "interrupt", turn: 1, speaker: "a1" }), {
+    type: "interrupt",
+    turn: 1,
+    speaker: "a1",
+  });
+  for (const bad of [
+    { type: "status", state: "speaking", speaker: "a 2" },
+    { type: "status", state: "speaking", speaker: 2 },
+    { type: "prompt", turn: 1, addressed: false, text: "x" },
+    { type: "prompt", turn: 1, speaker: "a1", text: "x" },
+    { type: "prompt", turn: 1, speaker: "../x", addressed: false, text: "x" },
+  ])
+    assert.throws(() => parseEngineMessage(bad), /Invalid Converse frame/, JSON.stringify(bad));
 });

@@ -21,6 +21,7 @@ pub struct ModelPaths {
     pub turn: PathBuf,
     pub asr: ModelDir,
     pub tts: ModelDir,
+    pub voices: ModelDir,
 }
 
 fn absolute_base(value: std::ffi::OsString, name: &str) -> anyhow::Result<PathBuf> {
@@ -178,11 +179,13 @@ pub fn resolve_models() -> anyhow::Result<ModelPaths> {
     let turn = inventory.role_asset("turn")?;
     let asr = inventory.role_asset("asr")?;
     let tts = inventory.role_asset("tts")?;
+    let voices = inventory.role_asset("voices")?;
     Ok(ModelPaths {
         vad: models.join(vad.runtime_path()),
         turn: models.join(turn.runtime_path()),
         asr: model_dir(&models, asr),
         tts: model_dir(&models, tts),
+        voices: model_dir(&models, voices),
     })
 }
 
@@ -194,6 +197,7 @@ pub fn check_models() -> anyhow::Result<ModelPaths> {
         .into_iter()
         .chain(paths.asr.files.iter().map(|path| ("asr file", path)))
         .chain(paths.tts.files.iter().map(|path| ("tts file", path)))
+        .chain(paths.voices.files.iter().map(|path| ("voice file", path)))
     {
         if !path.is_file() {
             missing.push(format!("{name}: {}", path.display()));

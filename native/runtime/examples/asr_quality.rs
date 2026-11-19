@@ -72,6 +72,7 @@ fn synth(dir: &Path) -> Result<()> {
     let models = paths::check_models()?;
     let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
         dir: models.tts.dir,
+        voices_dir: None,
     })?;
     let never = AtomicBool::new(false);
     let mut refs = String::new();

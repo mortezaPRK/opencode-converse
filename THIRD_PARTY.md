@@ -16,6 +16,16 @@ their upstream terms for the exact artifact before redistribution. The larger
 Phonon 40M models are CC BY-NC 4.0 and must not be installed. Phonon performs no
 phoneme conversion in its runtime, and the pinned asset set contains no eSpeak NG data; confirm this against the exact shipped artifacts.
 
+Four extra English voices come from **`gradium/phonon-voices`** (pinned commit
+`0ee17205f254b5abc43b266c8a0f215565c352f7`): Zoey, Maeve, Easton and Preston, each a
+256,136-byte `.safetensors` speaker embedding with its own SHA-256 in
+`assets/models.json`, installed locally and never fetched at run time. The
+repository card declares **Apache-2.0** (`license: apache-2.0`); it has no separate
+`LICENSE` file, so the Apache-2.0 text from `gradium/phonon-31m-en` is installed
+beside them together with the card (`README.md`). Credit: voices by Gradium. The
+voices are embeddings for Phonon S (31M), the model used here. Exact-artifact review
+is still required before redistribution (see `docs/release-gates.md`).
+
 Speech recognition is **Moonshine v2 Small Streaming** (123M, English), run by this
 project's own `ve-asr` crate on the shared ONNX Runtime; the official Moonshine C++
 library is not used. The upstream repository (`moonshine-ai/moonshine`, pinned

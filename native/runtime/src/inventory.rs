@@ -22,6 +22,7 @@ pub struct Roles {
     pub turn: String,
     pub asr: String,
     pub tts: String,
+    pub voices: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,11 +246,12 @@ impl Inventory {
             ("turn", &self.roles.turn),
             ("asr", &self.roles.asr),
             ("tts", &self.roles.tts),
+            ("voices", &self.roles.voices),
         ] {
             let asset = self
                 .asset(id)
                 .with_context(|| format!("Inventory role {role} references unknown asset {id}"))?;
-            if role == "tts" || role == "asr" {
+            if role == "tts" || role == "asr" || role == "voices" {
                 ensure!(
                     asset.format == Format::Files,
                     "Inventory {role} asset {id} must be a files directory"
@@ -269,6 +271,7 @@ impl Inventory {
             "turn" => &self.roles.turn,
             "asr" => &self.roles.asr,
             "tts" => &self.roles.tts,
+            "voices" => &self.roles.voices,
             _ => anyhow::bail!("Unknown speech model role"),
         };
         self.asset(id)
@@ -320,7 +323,18 @@ mod tests {
     #[test]
     fn compiled_inventory_is_consistent() {
         let inventory = Inventory::load().unwrap();
-        assert_eq!(inventory.assets.len(), 4);
+        assert_eq!(inventory.assets.len(), 5);
+        let voices = inventory.role_asset("voices").unwrap();
+        for name in ["zoey", "maeve", "easton", "preston"] {
+            assert!(
+                voices
+                    .files
+                    .iter()
+                    .any(|file| file.path == format!("{name}.safetensors")),
+                "{name}"
+            );
+        }
+        assert!(voices.files.iter().any(|file| file.path == "LICENSE"));
         assert_eq!(inventory.role_asset("vad").unwrap().id, "silero-vad");
         let tts = inventory.role_asset("tts").unwrap();
         assert_eq!(tts.id, "phonon-31m-en");

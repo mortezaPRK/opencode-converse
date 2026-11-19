@@ -89,6 +89,11 @@ Models are downloaded separately, never included in the npm source package:
   installed beside the weights) and the `moonshine-ai/moonshine-streaming-small`
   model card. Non-English legacy Moonshine models are non-commercial and are not
   used. Confirm the grant for the exact converted artifacts before redistribution.
+- Phonon voices (`gradium/phonon-voices`, pinned commit
+  `0ee17205f254b5abc43b266c8a0f215565c352f7`; Zoey, Maeve, Easton, Preston): speaker
+  embeddings for Phonon S (31M), **Apache-2.0** per the repository card (no separate
+  `LICENSE` file; the Apache-2.0 text from `gradium/phonon-31m-en` and the card are
+  installed with them). Voices by Gradium; exact-artifact review still required.
 - Phonon 31M English (`gradium/phonon-31m-en`, pinned commit in
   `assets/models.json`): weights, tokenizer, and the default voice are
   **Apache-2.0** per the model card and the `LICENSE` file installed with them.

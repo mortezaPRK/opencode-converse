@@ -109,7 +109,7 @@ function server(directory, changed) {
           assert.equal(input, undefined);
           checkLocation(options);
           calls.push({ method: "hello" });
-          return { protocol: 1 };
+          return { protocol: 2 };
         },
         start: async (input, options) => {
           checkLocation(options);
@@ -372,7 +372,7 @@ async function fixture(t) {
   async function drain() {
     const baseline = engine.length;
     const text = "Fixture playback drain barrier.";
-    transport.send({ type: "announcement", reply: "fixture-drain:0", text });
+    transport.send({ type: "announcement", speaker: "a1", reply: "fixture-drain:0", text });
     // Unlike mute/shutdown, this FIFO sentinel consumes all preceding jobs
     // without cancelling them. Listening is the real controller drain ack.
     await waitFor("fixture drain sentinel consumed and acknowledged listening", () => {
@@ -398,6 +398,8 @@ async function fixture(t) {
     {
       type: "prompt",
       turn: 1,
+      speaker: "a1",
+      addressed: false,
       text: "Fixture prompt.",
     },
   );
@@ -518,7 +520,14 @@ test(
       f.host.filter(
         (message) => message.type === "announcement" && message.reply !== "fixture-drain:0",
       ),
-      [{ type: "announcement", reply: `${assistantMessageID}:0`, text: summary.text }],
+      [
+        {
+          type: "announcement",
+          speaker: "a1",
+          reply: `${assistantMessageID}:0`,
+          text: summary.text,
+        },
+      ],
       "Rust dedupe must not mask duplicate announcements sent by the bridge",
     );
     assert.equal(

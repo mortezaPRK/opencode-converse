@@ -74,23 +74,26 @@ export default Plugin.define({
       );
       registrations.push(
         await ctx.session.hook("context", async (event) => {
-          if (event.agent !== AGENT) {
+          // A participant's session may run as any OpenCode primary agent, so ownership,
+          // not the agent name, decides who gets the supervisor tools and prompt.
+          const owned = await supervisor.isSupervisor(event.sessionID).catch(() => false);
+          if (!owned) {
             for (const name of Object.keys(event.tools)) {
-              if (name.startsWith("converse_")) delete event.tools[name];
+              if (event.agent === AGENT || name.startsWith("converse_")) delete event.tools[name];
             }
             return;
           }
-          const owned = await supervisor.isSupervisor(event.sessionID).catch(() => false);
-          for (const name of Object.keys(event.tools)) {
-            if (!owned || !toolIDs.has(name)) delete event.tools[name];
-          }
-          if (owned) event.system.push({ type: "text", text: SUPERVISOR_PROMPT });
+          if (event.agent === AGENT)
+            for (const name of Object.keys(event.tools)) {
+              if (!toolIDs.has(name)) delete event.tools[name];
+            }
+          event.system.push({ type: "text", text: await supervisor.systemPrompt(event.sessionID) });
         }),
       );
       registrations.push(
         await ctx.rpc.register(Converse, {
-          hello: async () => ({ protocol: 1 as const, packageRoot: PACKAGE_ROOT }),
-          start: async () => supervisor.start(),
+          hello: async () => ({ protocol: 2 as const, packageRoot: PACKAGE_ROOT }),
+          start: async (input) => supervisor.start(input?.participant),
           stop: async (input) => supervisor.stop(input.sessionID),
           attach: async (input) => supervisor.attachForUser(input.supervisorID, input.sessionID),
           detach: async (input) => supervisor.detachForUser(input.supervisorID, input.sessionID),

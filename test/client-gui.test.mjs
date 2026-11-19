@@ -51,7 +51,7 @@ function setup({ stop, start, fixture, options } = {}) {
     options: options ?? {},
     client: {
       rpc: () => ({
-        hello: async () => ({ protocol: 1, packageRoot: "/local/package" }),
+        hello: async () => ({ protocol: 2, packageRoot: "/local/package" }),
       }),
     },
     storage: {
@@ -103,6 +103,8 @@ function setup({ stop, start, fixture, options } = {}) {
         sessionID: "supervisor",
         interrupted: null,
         transcript: [],
+        participants: [],
+        speaker: null,
       };
       const bridge = {
         options,
@@ -190,6 +192,8 @@ test("GUI resolves server ID to main-owned credentials for both remote and sidec
     sessionID: "supervisor",
     interrupted: null,
     transcript: [],
+    participants: [],
+    speaker: null,
   });
   await s.api.stop(undefined, s.caller(1));
   await s.api.start({ serverID: "sidecar", directory: "/local" }, s.caller(2));

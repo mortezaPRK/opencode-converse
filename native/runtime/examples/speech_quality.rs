@@ -6,6 +6,9 @@ use std::sync::atomic::AtomicBool;
 
 // Reuse production inventory/path validation; this tool needs only a subset.
 #[allow(dead_code)]
+#[path = "../src/addressing.rs"]
+mod addressing;
+#[allow(dead_code)]
 #[path = "../src/controller.rs"]
 mod controller;
 #[allow(dead_code)]
@@ -161,6 +164,7 @@ fn main() -> Result<()> {
     let loading = std::time::Instant::now();
     let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
         dir: models.tts.dir,
+        voices_dir: None,
     })?;
     println!("TTS load: {:.2}s", loading.elapsed().as_secs_f64());
     let rate = tts.sample_rate();

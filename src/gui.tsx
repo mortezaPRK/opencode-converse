@@ -13,6 +13,7 @@ import {
 } from "@opencode/plugin/gui";
 import { ConverseDesktop } from "./gui/contract.js";
 import { main } from "./gui/main.js";
+import { agentColor, entryLabel, speakerSuffix } from "./roster-view.js";
 import {
   normalizeVoiceStatus,
   presence,
@@ -24,9 +25,6 @@ import {
 /** The composer pill colors its icon with these tones only; the rest keep the app default. */
 const pillTone = (tone: PresenceTone): ComposerPillTone | undefined =>
   tone === "success" || tone === "warning" || tone === "danger" ? tone : undefined;
-
-/** Role labels for the bridge-owned transcript; it is read-only prose. */
-const ROLE_LABEL = { user: "You", assistant: "Supervisor" } as const;
 
 export default Plugin.define({
   main,
@@ -106,6 +104,7 @@ export default Plugin.define({
     // The transcript is owned by the main-process bridge and arrives with the state,
     // so it never depends on the host's per-session message cache.
     const entries = () => audio.state()?.transcript ?? [];
+    const multi = () => (audio.state()?.participants.length ?? 0) > 1;
     const paused = () => audio.state()?.paused === true;
     const muted = () => audio.state()?.status === "muted";
     const supervisor = () => {
@@ -139,9 +138,23 @@ export default Plugin.define({
         >
           <div style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
             <div style={{ "font-weight": 600 }}>Activity</div>
-            <div>{view().label}</div>
+            <div>
+              {view().label}
+              {speakerSuffix(audio.state() ?? { participants: [], speaker: null })}
+            </div>
             <div style={{ opacity: 0.75 }}>{view().detail}</div>
             <div style={{ opacity: 0.75 }}>{supervisor()}</div>
+            <Show when={multi()}>
+              <div style={{ display: "flex", gap: "10px", "flex-wrap": "wrap" }}>
+                <Index each={audio.state()?.participants ?? []}>
+                  {(participant, index) => (
+                    <span style={{ color: agentColor(index), "font-weight": 600 }}>
+                      {participant().name}
+                    </span>
+                  )}
+                </Index>
+              </div>
+            </Show>
             <Show when={paused()}>
               <div style={{ opacity: 0.75 }}>
                 Spoken output is paused. The runtime and in-flight work keep running.
@@ -171,11 +184,12 @@ export default Plugin.define({
                         style={{
                           "font-size": "11px",
                           "letter-spacing": "0.04em",
-                          opacity: 0.6,
+                          opacity: 0.85,
                           "text-transform": "uppercase",
+                          color: agentColor(entry().agent),
                         }}
                       >
-                        {ROLE_LABEL[entry().role]}
+                        {entryLabel(entry(), multi())}
                       </div>
                       <div style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>
                         {entry().text}
@@ -275,7 +289,10 @@ export default Plugin.define({
         }}
       >
         <div style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
-          <div>{view().label}</div>
+          <div>
+            {view().label}
+            {speakerSuffix(audio.state() ?? { participants: [], speaker: null })}
+          </div>
           <div style={{ opacity: 0.75 }}>{view().detail}</div>
           <div style={{ opacity: 0.75 }}>{supervisor()}</div>
           <Show when={paused()}>

@@ -360,7 +360,7 @@ export default Plugin.define({ id: contract.id, async setup(ctx) {
     15_000,
   );
   const hello = await rpc.hello(undefined, options());
-  assert.equal(hello.protocol, 1);
+  assert.equal(hello.protocol, 2);
   assert.ok(hello.packageRoot, "The server must report its package root for the local GUI engine");
   const info = await client.server.info();
   assert.match(info.version, /^2\.3\./, "This regression targets the installed 2.3 host contract");

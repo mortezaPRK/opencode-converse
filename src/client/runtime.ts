@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
-import { parseRuntimeConfig, type RuntimeConfig } from "../config.js";
+import { parseRuntimeConfig, resolveRoster, type RuntimeConfig } from "../config.js";
 import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
@@ -62,6 +62,7 @@ export function runtimeSettings(value: RuntimeConfig | undefined): LocalSettings
     ...(config.endpointing === undefined ? {} : { endpointing: config.endpointing }),
     ...(config.acknowledgement === undefined ? {} : { acknowledgement: config.acknowledgement }),
     ...(config.echoCancellation === undefined ? {} : { echoCancellation: config.echoCancellation }),
+    participants: resolveRoster(config.agents),
   };
 }
 
@@ -77,6 +78,7 @@ function exactOptional(value: Record<string, unknown>, required: string[], optio
   );
 }
 const milliseconds = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+const speaker = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9]{1,16}$/.test(value);
 const turn = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
 export function parseEngineMessage(value: unknown): EngineMessage {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -87,15 +89,18 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     return v as EngineMessage;
   if (
     v.type === "status" &&
-    exact(v, ["type", "state"]) &&
+    exactOptional(v, ["type", "state"], ["speaker"]) &&
+    (v.speaker === undefined || speaker(v.speaker)) &&
     typeof v.state === "string" &&
     ["loading", "listening", "hearing", "thinking", "speaking", "muted"].includes(v.state)
   )
     return v as EngineMessage;
   if (
     v.type === "prompt" &&
-    exact(v, ["type", "turn", "text"]) &&
+    exact(v, ["type", "turn", "speaker", "addressed", "text"]) &&
     turn(v.turn) &&
+    speaker(v.speaker) &&
+    typeof v.addressed === "boolean" &&
     text(v.text) &&
     (v.text as string).trim()
   )
@@ -103,7 +108,8 @@ export function parseEngineMessage(value: unknown): EngineMessage {
   if (
     v.type === "interrupt" &&
     turn(v.turn) &&
-    exactOptional(v, ["type", "turn"], ["played_ms", "generated_ms", "heard"]) &&
+    exactOptional(v, ["type", "turn"], ["speaker", "played_ms", "generated_ms", "heard"]) &&
+    (v.speaker === undefined || speaker(v.speaker)) &&
     (v.heard === undefined || (text(v.heard) && Buffer.byteLength(v.heard as string) <= 4096)) &&
     (v.played_ms === undefined) === (v.generated_ms === undefined) &&
     (v.played_ms === undefined ||
@@ -122,7 +128,7 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     return v as EngineMessage;
   throw new Error(
     v.type === "hello"
-      ? "Converse protocol version mismatch (expected 1)"
+      ? "Converse protocol version mismatch (expected 2)"
       : "Invalid Converse frame",
   );
 }

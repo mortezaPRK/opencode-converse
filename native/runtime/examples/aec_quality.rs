@@ -303,6 +303,7 @@ fn main() -> Result<()> {
     let models = paths::check_models()?;
     let mut tts = ve_tts::Tts::new(ve_tts::TtsConfig {
         dir: models.tts.dir.clone(),
+        voices_dir: None,
     })?;
     let never = AtomicBool::new(false);
     let mut render = vec![0.0f32; RATE / 2];

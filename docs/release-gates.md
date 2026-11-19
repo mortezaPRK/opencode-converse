@@ -69,6 +69,15 @@ architectures are not implied by operating-system support.
   canceller. Until this passes, document headphones as the safe choice and keep
   `echoCancellation: "off"` available. Also test with a different output and input
   device clock (USB mic, Bluetooth speaker) for drift.
+- **Multi-agent voices.** With `agents` configured on real hardware: the four voices
+  (`zoey`, `maeve`, `easton`, `preston`) are clearly distinguishable from each other
+  and from the default voice; addressing by leading and trailing name works with real
+  ASR output (try names a recogniser tends to mishear) and an unnamed prompt goes to
+  the first agent; the acknowledgement cue plays in the addressee's voice; speaking
+  over any agent cuts it at once and drops queued speech; each agent's replies reach
+  only its own session and its own followed sessions; transcripts and the sidebar
+  show the right name and colour. Confirm voice switching adds no audible gap
+  (measured offline: first audio about 20-90 ms per voice on Apple silicon).
 - Test default-device changes, Bluetooth devices, and microphone removal.
 
 ## Distribution and compliance
@@ -77,6 +86,12 @@ architectures are not implied by operating-system support.
 - Review exact model cards, datasets/voice terms, native-library notices, and
   transitive assets. Verify the Phonon Apache-2.0 notice and Kyutai (Pocket TTS /
   Mimi) attribution for the actual bundle.
+- Phonon voices (`gradium/phonon-voices`, pinned commit `0ee17205f254b5abc43b266c8a0f215565c352f7`):
+  the repository declares `license: apache-2.0` in its card metadata only and ships no
+  `LICENSE` file; the Apache-2.0 text installed beside the voices is the one from
+  `gradium/phonon-31m-en`. Confirm with Gradium (or from the dataset terms) that the
+  four shipped embeddings (Zoey, Maeve, Easton, Preston) carry no extra likeness or
+  attribution terms before redistributing, and keep the Gradium attribution.
 - Produce a third-party inventory, notices, and any required source materials.
 - Review npm and Cargo dependency advisories. Do not use forced dependency upgrades
   as a substitute for testing the supported SDK.

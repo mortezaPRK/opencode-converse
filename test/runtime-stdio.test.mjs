@@ -9,7 +9,7 @@ import { buildFixture } from "./client-cargo-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 let executable;
-const init = { type: "init", protocol: 1, settings: {} };
+const init = { type: "init", protocol: 2, settings: {} };
 
 async function cleanupResources(resources, remove, timeoutMs = 5000) {
   const results = await Promise.allSettled(
@@ -108,7 +108,12 @@ function playbackTrace(stderr) {
     .split("\n")
     .map((line) => {
       const trace = JSON.parse(line);
-      assert.deepEqual(Object.keys(trace).sort(), ["fixture", "text"]);
+      assert.deepEqual(
+        Object.keys(trace)
+          .filter((key) => key !== "voice")
+          .sort(),
+        ["fixture", "text"],
+      );
       assert.equal(trace.fixture, "played");
       assert.equal(typeof trace.text, "string");
       assert.ok(trace.text.length > 0 && Buffer.byteLength(trace.text) <= 320);
@@ -124,7 +129,7 @@ test(
     proc.send(init);
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
     for (let i = 0; i < 300; i++)
-      proc.send({ type: "reply_end", turn: 1, reply: `reply-${i}`, text: "A b c." });
+      proc.send({ type: "reply_end", speaker: "a1", turn: 1, reply: `reply-${i}`, text: "A b c." });
     proc.send({ type: "turn_end", turn: 1, reason: "completed" });
     await proc.wait(
       (frames) =>
@@ -250,8 +255,8 @@ for (const [name, announcement, text] of [
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
     proc.send(
       announcement
-        ? { type: "announcement", reply: "long", text }
-        : { type: "reply_end", turn: 1, reply: "long", text },
+        ? { type: "announcement", speaker: "a1", reply: "long", text }
+        : { type: "reply_end", speaker: "a1", turn: 1, reply: "long", text },
     );
     proc.send({ type: "turn_end", turn: 1, reason: "completed" });
     await proc.wait(
@@ -331,9 +336,27 @@ test(
     proc.send(init);
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
     const prompt = proc.frames.find((f) => f.type === "prompt");
-    assert.deepEqual(prompt, { type: "prompt", turn: 1, text: "Fixture prompt." });
-    proc.send({ type: "reply_end", turn: 1, reply: "reply-1", text: "This is the full reply." });
-    proc.send({ type: "reply_end", turn: 1, reply: "reply-1", text: "This is the full reply." });
+    assert.deepEqual(prompt, {
+      type: "prompt",
+      turn: 1,
+      speaker: "a1",
+      addressed: false,
+      text: "Fixture prompt.",
+    });
+    proc.send({
+      type: "reply_end",
+      speaker: "a1",
+      turn: 1,
+      reply: "reply-1",
+      text: "This is the full reply.",
+    });
+    proc.send({
+      type: "reply_end",
+      speaker: "a1",
+      turn: 1,
+      reply: "reply-1",
+      text: "This is the full reply.",
+    });
     proc.send({ type: "turn_end", turn: 1, reason: "completed" });
     await proc.wait((frames) => frames.at(-1)?.state === "listening");
     assert.equal(proc.frames.filter((f) => f.state === "speaking").length, 1);
@@ -355,7 +378,13 @@ test(
     proc.send(init);
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
     proc.send({ type: "mute", on: true });
-    proc.send({ type: "reply_end", turn: 1, reply: "stale", text: "Do not speak this." });
+    proc.send({
+      type: "reply_end",
+      speaker: "a1",
+      turn: 1,
+      reply: "stale",
+      text: "Do not speak this.",
+    });
     proc.send({ type: "mute", on: false });
     await proc.wait((frames) => frames.at(-1)?.state === "listening");
     assert.ok(proc.frames.some((f) => f.type === "interrupt" && f.turn === 1));
@@ -373,7 +402,13 @@ test(
     proc.send(init);
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
     proc.send({ type: "pause", on: true });
-    proc.send({ type: "reply_end", turn: 1, reply: "held", text: "Wait for resume." });
+    proc.send({
+      type: "reply_end",
+      speaker: "a1",
+      turn: 1,
+      reply: "held",
+      text: "Wait for resume.",
+    });
     proc.send({ type: "turn_end", turn: 1, reason: "completed" });
     await proc.wait((frames) => frames.some((f) => f.state === "speaking"));
     // Give the fixture several playback ticks; nothing may reach the device trace.
@@ -402,9 +437,21 @@ test(
     const proc = await runtime(t);
     proc.send(init);
     await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
-    proc.send({ type: "reply_delta", turn: 1, reply: "decimal", text: "The value is 3." });
-    proc.send({ type: "reply_delta", turn: 1, reply: "decimal", text: "14." });
-    proc.send({ type: "reply_end", turn: 1, reply: "decimal", text: "The value is 3.14." });
+    proc.send({
+      type: "reply_delta",
+      speaker: "a1",
+      turn: 1,
+      reply: "decimal",
+      text: "The value is 3.",
+    });
+    proc.send({ type: "reply_delta", speaker: "a1", turn: 1, reply: "decimal", text: "14." });
+    proc.send({
+      type: "reply_end",
+      speaker: "a1",
+      turn: 1,
+      reply: "decimal",
+      text: "The value is 3.14.",
+    });
     proc.send({ type: "turn_end", turn: 1, reason: "completed" });
     await proc.wait(
       (frames) =>
@@ -430,6 +477,7 @@ test(
     await proc.wait((frames) => frames.at(-1)?.state === "listening");
     const announcement = {
       type: "announcement",
+      speaker: "a1",
       reply: "worker-update",
       text: "Worker **finished** safely.\n```\nsecret();\n```\n",
     };
@@ -450,9 +498,9 @@ test(
 
 for (const [name, input] of [
   ["unknown message", '{"type":"unknown"}\n'],
-  ["unknown fields", '{"type":"init","protocol":1,"settings":{"modelPath":"/untrusted"}}\n'],
+  ["unknown fields", '{"type":"init","protocol":2,"settings":{"modelPath":"/untrusted"}}\n'],
   ["unit-message unknown fields", '{"type":"shutdown","surprise":true}\n'],
-  ["protocol mismatch", '{"type":"init","protocol":2,"settings":{}}\n'],
+  ["protocol mismatch", '{"type":"init","protocol":1,"settings":{}}\n'],
   ["malformed JSON", "{definitely not JSON}\n"],
   ["oversized unterminated frame", "x".repeat(1_048_577)],
   ["oversized terminated frame", "x".repeat(1_048_577) + "\n"],
@@ -524,4 +572,83 @@ test("normal run never silently starts fixture mode", { timeout: 10_000 }, async
     false,
   );
   assert.ok(result.frames.some((f) => f.code === "native_unavailable"));
+});
+
+const roster = [
+  { id: "a1", name: "Ada", voice: "zoey" },
+  { id: "a2", name: "Grace", voice: "easton" },
+];
+
+test(
+  "stdio fixture speaks each participant in its own voice and shows who is thinking or speaking",
+  { timeout: 15_000 },
+  async (t) => {
+    const proc = await runtime(t);
+    await proc.wait((frames) => frames.some((f) => f.type === "hello"));
+    proc.send({ ...init, settings: { participants: roster } });
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+    const frames = proc.frames;
+    assert.equal(frames.find((f) => f.type === "prompt").speaker, "a1");
+    assert.deepEqual(
+      frames.find((f) => f.type === "status" && f.state === "thinking"),
+      {
+        type: "status",
+        state: "thinking",
+        speaker: "a1",
+      },
+    );
+    proc.send({ type: "reply_end", speaker: "a1", turn: 1, reply: "r1", text: "Ada speaks." });
+    proc.send({ type: "reply_end", speaker: "a2", turn: 1, reply: "r2", text: "Grace waits." });
+    proc.send({ type: "turn_end", turn: 1, reason: "completed" });
+    await proc.wait((all) => {
+      const speaking = all.findLastIndex((f) => f.type === "status" && f.speaker === "a2");
+      return speaking >= 0 && all.slice(speaking).some((f) => f.state === "listening");
+    });
+    proc.send({ type: "shutdown" });
+    const result = await proc.closed;
+    assert.equal(result.code, 0);
+    assert.deepEqual(playbackTrace(result.stderr), [
+      { fixture: "played", text: "Ada speaks.", voice: "zoey" },
+      { fixture: "played", text: "Grace waits.", voice: "easton" },
+    ]);
+    assert.ok(
+      result.frames.some(
+        (f) => f.type === "status" && f.state === "speaking" && f.speaker === "a1",
+      ),
+    );
+    assert.ok(
+      result.frames.some(
+        (f) => f.type === "status" && f.state === "speaking" && f.speaker === "a2",
+      ),
+    );
+  },
+);
+
+test("stdio rejects an invalid roster and speakers outside it", { timeout: 15_000 }, async (t) => {
+  for (const settings of [
+    { participants: [] },
+    { participants: [{ id: "a1", name: "Ada", voice: "nobody" }] },
+    {
+      participants: [
+        { id: "a1", name: "Ada", voice: "zoey" },
+        { id: "a1", name: "Bo", voice: "maeve" },
+      ],
+    },
+  ]) {
+    const proc = await runtime(t);
+    await proc.wait((frames) => frames.some((f) => f.type === "hello"));
+    proc.send({ ...init, settings });
+    const result = await proc.closed;
+    assert.ok(
+      result.frames.some((f) => f.code === "invalid_protocol" && f.fatal),
+      JSON.stringify(settings),
+    );
+  }
+  const proc = await runtime(t);
+  await proc.wait((frames) => frames.some((f) => f.type === "hello"));
+  proc.send({ ...init, settings: { participants: roster } });
+  await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+  proc.send({ type: "reply_end", speaker: "a9", turn: 1, reply: "r", text: "Nobody." });
+  const result = await proc.closed;
+  assert.ok(result.frames.some((f) => f.code === "invalid_state" && f.fatal));
 });

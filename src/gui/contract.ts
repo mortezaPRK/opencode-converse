@@ -22,8 +22,18 @@ export const ConverseDesktop = Ipc.define({
       Schema.Struct({
         role: Schema.Literals(["user", "assistant"]),
         text: Schema.String,
+        agent: Schema.optional(Schema.Number),
+        speaker: Schema.optional(Schema.String),
       }),
     ),
+    participants: Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        name: Schema.String,
+        voice: Schema.String,
+      }),
+    ),
+    speaker: Schema.NullOr(Schema.String),
   }),
   methods: {
     start: {

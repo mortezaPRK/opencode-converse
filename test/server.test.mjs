@@ -1776,10 +1776,10 @@ test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.equal(Converse.id, "converse");
   assert.deepEqual(Object.keys(Converse.methods), ["hello", "start", "stop", "attach", "detach"]);
   const hello = Converse.methods.hello.output["~standard"];
-  assert.deepEqual(await hello.validate({ protocol: 1, packageRoot: "/pkg" }), {
-    value: { protocol: 1, packageRoot: "/pkg" },
+  assert.deepEqual(await hello.validate({ protocol: 2, packageRoot: "/pkg" }), {
+    value: { protocol: 2, packageRoot: "/pkg" },
   });
-  assert.ok((await hello.validate({ protocol: 1, extra: true })).issues);
+  assert.ok((await hello.validate({ protocol: 2, extra: true })).issues);
   const input = Converse.methods.start.input["~standard"];
   assert.deepEqual(await input.validate(undefined), { value: undefined });
   assert.ok((await input.validate({ model: { providerID: "p", id: "m" } })).issues);
@@ -2778,7 +2778,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     await assert.rejects(tool.execute({}, { sessionID: "forged-supervisor" }), /owning Converse/);
   }
   const hello = await rpc.hello();
-  assert.equal(hello.protocol, 1);
+  assert.equal(hello.protocol, 2);
   assert.ok(hello.packageRoot);
   const { sessionID, runtime } = await rpc.start();
   assert.deepEqual(runtime, {});
@@ -3070,4 +3070,152 @@ test("on-screen attach announces the session to the supervisor and follows its u
   });
   assert.equal(f.notices.length, 2, "its completion is spoken like any worker update");
   await assert.rejects(f.service.attachForUser(mine.id, mine.id), /owning Converse supervisor/);
+});
+
+function crewFixture(agents) {
+  const f = fixture();
+  const model = f.model;
+  const service = new Supervisor(f.ctx, {
+    supervisorModel: model,
+    workerModel: model,
+    runtime: { agents },
+  });
+  return { ...f, service };
+}
+
+test("each configured agent gets its own supervisor session with its own OpenCode agent and model", async () => {
+  const f = crewFixture([
+    { name: "Ada", voice: "zoey", agent: "build", prompt: "Review code." },
+    { name: "Grace", model: { providerID: "test", id: "model", variant: "fast" } },
+  ]);
+  const first = await f.service.start();
+  assert.equal(f.sessions.size, 1, "the rest are created lazily");
+  const second = await f.service.start("a2");
+  assert.notEqual(first.sessionID, second.sessionID);
+  const [a, b] = [f.sessions.get(first.sessionID), f.sessions.get(second.sessionID)];
+  assert.equal(a.agent, "build");
+  assert.equal(b.agent, AGENT);
+  assert.equal(a.title, "Converse: Ada");
+  assert.deepEqual(b.model, { providerID: "test", id: "model", variant: "fast" });
+  assert.equal(a.metadata[SUPERVISOR_KEY].participant, "a1");
+  assert.equal(b.metadata[SUPERVISOR_KEY].participant, "a2");
+  assert.equal(
+    await f.service.isSupervisor(first.sessionID),
+    true,
+    "a custom agent still owns tools",
+  );
+  assert.equal(await f.service.isSupervisor(second.sessionID), true);
+  assert.match(await f.service.systemPrompt(first.sessionID), /You are Ada[\s\S]*Review code\./);
+  assert.match(await f.service.systemPrompt(second.sessionID), /You are Grace/);
+  assert.doesNotMatch(await f.service.systemPrompt(second.sessionID), /Review code/);
+
+  // Following state is per agent: each supervisor session registers its own followed workers.
+  await f.service.execute("start_session", { task: "Do work" }, first.sessionID);
+  const registrations = followedIDs(f);
+  assert.equal(registrations.length, 1);
+  await assert.rejects(
+    f.service.execute(
+      "send_message",
+      { sessionID: registrations[0], text: "hi" },
+      second.sessionID,
+    ),
+    /not followed by this conversation/,
+  );
+  await f.service.stop(first.sessionID);
+  await f.service.stop(second.sessionID);
+  assert.equal(await f.service.isSupervisor(first.sessionID), false);
+});
+
+test("a bad roster fails when the conversation starts, before any session exists", async () => {
+  const unavailable = crewFixture([{ name: "Ada" }, { name: "Grace", agent: "nonexistent" }]);
+  await assert.rejects(unavailable.service.start(), /Agent "nonexistent" is unavailable/);
+  assert.equal(unavailable.sessions.size, 0);
+  const hidden = crewFixture([{ name: "Ada", agent: "hidden" }]);
+  await assert.rejects(hidden.service.start(), /unavailable/);
+  const model = crewFixture([{ name: "Ada", model: { providerID: "test", id: "missing" } }]);
+  await assert.rejects(model.service.start(), /model test\/missing is unavailable/);
+  const ok = crewFixture([{ name: "Ada" }]);
+  await assert.rejects(ok.service.start("a7"), /Unknown Converse participant/);
+});
+
+test("a single default agent keeps today's session and prompt", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  const session = f.sessions.get(sessionID);
+  assert.equal(session.title, "Converse");
+  assert.equal(session.agent, AGENT);
+  const { SUPERVISOR_PROMPT } = await import("../dist/supervisor.js");
+  assert.equal(await f.service.systemPrompt(sessionID), SUPERVISOR_PROMPT);
+});
+
+test("start RPC takes an optional participant and rejects anything else", async () => {
+  const start = Converse.methods.start.input["~standard"];
+  assert.deepEqual(await start.validate(undefined), { value: undefined });
+  assert.deepEqual(await start.validate({ participant: "a2" }), { value: { participant: "a2" } });
+  assert.ok((await start.validate({ participant: "" })).issues);
+  assert.ok((await start.validate({ model: "x" })).issues);
+});
+
+test("context hook gives an owned custom-agent session the tools and its own roster prompt", async () => {
+  const f = fixture();
+  let hook;
+  let rpc;
+  const noop = { dispose: async () => {} };
+  const ctx = {
+    ...f.ctx,
+    options: {
+      supervisorModel: f.model,
+      workerModel: f.model,
+      agents: [{ name: "Ada", agent: "build" }, { name: "Grace" }],
+    },
+    agent: { ...f.ctx.agent, transform: async () => noop },
+    tool: { transform: async () => noop },
+    session: {
+      ...f.ctx.session,
+      hook: async (_name, callback) => {
+        hook = callback;
+        return noop;
+      },
+    },
+    rpc: {
+      register: async (_definition, implementation) => {
+        rpc = implementation;
+        return noop;
+      },
+    },
+    event: {
+      subscribe: ({ signal }) => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            if (!signal.aborted)
+              await new Promise((resolve) =>
+                signal.addEventListener("abort", resolve, { once: true }),
+              );
+            return { done: true };
+          },
+        }),
+      }),
+    },
+  };
+  const cleanup = await plugin.setup(ctx);
+  const ada = await rpc.start();
+  const grace = await rpc.start({ participant: "a2" });
+  const tools = () => ({ converse_start_session: {}, shell: {}, other_tool: {} });
+  const custom = { agent: "build", sessionID: ada.sessionID, tools: tools(), system: [] };
+  await hook(custom);
+  assert.deepEqual(Object.keys(custom.tools).sort(), [
+    "converse_start_session",
+    "other_tool",
+    "shell",
+  ]);
+  assert.match(custom.system.at(-1).text, /You are Ada/);
+  const hidden = { agent: AGENT, sessionID: grace.sessionID, tools: tools(), system: [] };
+  await hook(hidden);
+  assert.deepEqual(Object.keys(hidden.tools), ["converse_start_session"]);
+  assert.match(hidden.system.at(-1).text, /You are Grace/);
+  const stranger = { agent: "build", sessionID: "somebody-else", tools: tools(), system: [] };
+  await hook(stranger);
+  assert.deepEqual(Object.keys(stranger.tools).sort(), ["other_tool", "shell"]);
+  assert.deepEqual(stranger.system, []);
+  await cleanup();
 });
