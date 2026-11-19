@@ -18,8 +18,6 @@ pub struct Settings {
     #[serde(default)]
     pub tts_threads: Option<u16>,
     #[serde(default)]
-    pub use_gpu: Option<bool>,
-    #[serde(default)]
     pub endpointing: Option<EndpointingSetting>,
 }
 
@@ -219,7 +217,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"useGpu":false,"endpointing":"patient"}}"#,
+            r#"{"type":"init","protocol":1,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());

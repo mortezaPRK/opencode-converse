@@ -14,7 +14,6 @@ export interface ModelRef {
 export interface RuntimeConfig {
   readonly asrThreads?: number;
   readonly ttsThreads?: number;
-  readonly useGpu?: boolean;
   readonly endpointing?: Endpointing;
 }
 
@@ -24,7 +23,6 @@ export const PLUGIN_OPTION_KEYS = [
   "workerModel",
   "asrThreads",
   "ttsThreads",
-  "useGpu",
   "endpointing",
 ] as const;
 
@@ -63,12 +61,6 @@ function threadOption(value: unknown, name: string): number | undefined {
   return value as number;
 }
 
-function booleanOption(value: unknown, name: string): boolean | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
-  return value;
-}
-
 function endpointingOption(value: unknown): Endpointing | undefined {
   if (value === undefined || value === null) return undefined;
   if (value !== "responsive" && value !== "patient")
@@ -82,12 +74,10 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   keys(input, PLUGIN_OPTION_KEYS);
   const asrThreads = threadOption(input.asrThreads, "asrThreads");
   const ttsThreads = threadOption(input.ttsThreads, "ttsThreads");
-  const useGpu = booleanOption(input.useGpu, "useGpu");
   const endpointing = endpointingOption(input.endpointing);
   return {
     ...(asrThreads === undefined ? {} : { asrThreads }),
     ...(ttsThreads === undefined ? {} : { ttsThreads }),
-    ...(useGpu === undefined ? {} : { useGpu }),
     ...(endpointing === undefined ? {} : { endpointing }),
   };
 }

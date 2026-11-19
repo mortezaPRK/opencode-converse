@@ -16,7 +16,6 @@ export interface LocalSettings {
   outputDevice?: string;
   asrThreads?: number;
   ttsThreads?: number;
-  useGpu?: boolean;
   endpointing?: Endpointing;
 }
 

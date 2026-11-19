@@ -76,7 +76,7 @@ test("runtime sends only protocol init and local device preferences", async () =
 
 test("runtime sends configured inference tuning over init", async () => {
   const { proc, runtime } = setup({
-    runtime: { asrThreads: 2, ttsThreads: 3, useGpu: false },
+    runtime: { asrThreads: 2, ttsThreads: 3 },
   });
   proc.frame({ type: "hello", protocol: 1 });
   await runtime.ready;
@@ -88,7 +88,6 @@ test("runtime sends configured inference tuning over init", async () => {
         inputDevice: "mic",
         asrThreads: 2,
         ttsThreads: 3,
-        useGpu: false,
       },
     },
   ]);
@@ -104,9 +103,8 @@ test("runtime sends endpointing over init", async () => {
 });
 
 test("runtimeSettings contains only inference tuning", () => {
-  assert.deepEqual(runtimeSettings({ asrThreads: 2, useGpu: false }), {
+  assert.deepEqual(runtimeSettings({ asrThreads: 2 }), {
     asrThreads: 2,
-    useGpu: false,
   });
 });
 

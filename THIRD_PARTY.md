@@ -3,7 +3,7 @@
 The project license applies to project source, not to third-party libraries or
 model weights. Preserve copyright and permission notices when reusing source.
 
-The Rust speech stack uses whisper-rs/whisper.cpp/GGML, ONNX Runtime, the `ptts`
+The Rust speech stack uses ONNX Runtime (Silero VAD, Smart Turn, Moonshine), the `ptts`
 Phonon runtime, and platform audio libraries. The top-level license of a wrapper
 does not establish the terms of every bundled component.
 
@@ -16,13 +16,22 @@ their upstream terms for the exact artifact before redistribution. The larger
 Phonon 40M models are CC BY-NC 4.0 and must not be installed. Phonon performs no
 phoneme conversion in its runtime, and the pinned asset set contains no eSpeak NG data; confirm this against the exact shipped artifacts.
 
-The resolved **whisper-rs 0.16.0** Rust binding and **whisper-rs-sys 0.15.0** FFI
-binding declare **Unlicense**, not MIT. Their source archives identify revision
-`7558e1b72f54f2f22a53589afb77e65681834c36`; the binding's
-[Unlicense notice](https://codeberg.org/tazz4843/whisper-rs/src/commit/7558e1b72f54f2f22a53589afb77e65681834c36/LICENSE)
-is separate from the **MIT** notice shipped for whisper.cpp / bundled GGML
-source (Copyright (c) 2023-2024 The ggml authors). Exact-artifact review must
-retain these distinct notices and reverify the versions actually shipped.
+Speech recognition is **Moonshine v2 Small Streaming** (123M, English), run by this
+project's own `ve-asr` crate on the shared ONNX Runtime; the official Moonshine C++
+library is not used. The upstream repository (`moonshine-ai/moonshine`, pinned
+`d8d8fa29d05ca67441a7719e70099f9f48917a93`) states that its code and all English and
+streaming speech-to-text models are **MIT** (Copyright (c) 2025 Useful Sensors, Inc.
+dba Moonshine AI); only legacy non-English non-streaming models use the
+non-commercial Moonshine Community License, and none of those is used. That
+`LICENSE` is installed beside the weights. The Hugging Face card for
+`moonshine-ai/moonshine-streaming-small` also declares MIT. The pinned runtime files are
+quantized ONNX Runtime (`.ort`) conversions from Moonshine's model CDN
+(`quantized_26_11_02`); they carry no per-file license metadata, so the MIT grant for
+those exact converted artifacts must be confirmed in the exact-artifact review.
+Whisper is no longer shipped: the ASR crate, whisper.cpp, GGML, and the Whisper
+weights are removed. The Smart Turn feature frontend still uses a Rust port of the
+Hugging Face Transformers Whisper log-mel math (Apache-2.0; see
+`native/THIRD_PARTY.md`).
 This inventory does not establish blanket native redistribution clearance.
 
 Before distributing native bundles, inventory the exact shipped libraries and
@@ -36,7 +45,7 @@ Speech assets need separate verification:
 | --------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Silero VAD      | Exact model revision, upstream license and notices                                                               |
 | Smart Turn      | Exact checkpoint, upstream license and notices                                                                   |
-| Whisper English | Exact weights, upstream license and notices                                                                      |
+| Moonshine Small | Exact `.ort` files and tokenizer (hash-pinned), MIT notice from the pinned upstream `LICENSE`                    |
 | Phonon 31M      | Exact weights/tokenizer/voice commit, Apache-2.0 notice, Kyutai (Pocket TTS/Mimi) attribution and upstream terms |
 
 No model weights are included in the npm package. The package may include a

@@ -249,10 +249,10 @@ impl Inventory {
             let asset = self
                 .asset(id)
                 .with_context(|| format!("Inventory role {role} references unknown asset {id}"))?;
-            if role == "tts" {
+            if role == "tts" || role == "asr" {
                 ensure!(
                     asset.format == Format::Files,
-                    "Inventory TTS asset {id} must be a files directory"
+                    "Inventory {role} asset {id} must be a files directory"
                 );
             }
         }

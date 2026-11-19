@@ -1,7 +1,7 @@
 # Speech and audio stack research — November 2026
 
-Status: **research, partly implemented** as of 19 November 2026 (engine 0.2.0). The original document of
-18 November 2026 was research only. Since then: Piper/sherpa-onnx was replaced by Gradium Phonon 31M (`ptts`);
+Status: **research, partly implemented** as of 19 November 2026 (engine 0.3.0). The original document of
+18 November 2026 was research only. Since then: Piper/sherpa-onnx was replaced by Gradium Phonon 31M (`ptts`); Whisper `base.en` was replaced by Moonshine v2 Small Streaming (§6.4, phase one);
 played/generated sample accounting reports what was actually heard on interrupt; `endpointing: responsive|patient`
 was added; spoken output can be paused; Silero VAD was already v6.2. Sections describing Piper are the
 pre-change baseline. The document exists to make future changes cheap to justify and easy to
@@ -502,9 +502,33 @@ changes WER, CPU, and bundle contents, and it is measurable against the current
 encoder, revision ids, and "volatile vs final" plumbing live — and where Apple's
 volatile-result design and Moonshine's provisional states are worth copying.
 
-Open item: Moonshine publishes `.ort` flatbuffers, and `ort` 2.0 can load them, but the
-exact artifact layout and tokenizer files must be verified before this is scoped as M
-rather than L.
+> **Status (19 November 2026): phase one is implemented.** The engine's `ve-asr` crate
+> now runs Moonshine v2 **Small Streaming** (123M, English, MIT) on the shared
+> `ort =2.0.0-rc.15` (CPU, no second ORT, official C++ library not used). The open item
+> below was resolved: the `.ort` flatbuffers load in `ort` rc.15 unchanged. The English
+> small model ships as eight files (`quantized_26_11_02` on `download.moonshine.ai`, pinned
+> by SHA-256 in `assets/models.json`): `frontend.model.ort` + `frontend.weights.ort`
+> (stateful conv frontend; int8 weights are dequantized once and fed as extra inputs),
+> `encoder.ort` (sliding window, 16-frame left context per layer), `adapter.ort`,
+> `cross_kv.ort`, `decoder_kv.ort`, `tokenizer.bin` and `streaming_config.json`. Input is raw
+> 16 kHz audio fed in 1,280-sample chunks; decoding is greedy with a KV cache, capped at
+> 6.5 tokens per second of audio (and 448 tokens) to stop repetition loops. There is no
+> no-speech head, so `rejected` means silence (RMS gate) or output with no letters/digits.
+> Measured (M-series Mac, release build, 4 threads, `asr_quality` example) on 14 identical
+> Phonon-synthesized coding utterances (164 reference words; spoken forms such as "dot ts" count
+> as errors for engines that write ".ts"): Moonshine WER 9.8% vs Whisper base.en (Metal)
+> 14.0%; mean latency 194 ms vs 96 ms per utterance (RTF 0.045 vs 0.022); load 0.2 s vs
+> 0.1 s warm (8.6 s on the first Metal run); RSS after the run 566 MB vs 286 MB. Whisper
+> transcribed low noise as "(buzzer)"; Moonshine produced no text. Synthetic TTS speech is
+> a relative check only, not a real-microphone accuracy claim.
+> The Whisper log-mel port in `ve-turn` is unrelated and stays.
+>
+> Phase two (partials) would reuse the same sessions: keep one frontend/encoder/memory state
+> per utterance, feed capture frames as they arrive, run `encode(is_final = false)` (holds back
+> the 16-frame lookahead), and re-run `cross_kv` + decode over the memory so far for volatile
+> text, optionally speculating from the previous draft; the final pass is today's code.
+> It needs a per-utterance streaming state in the ASR worker, revision ids on the protocol,
+> and a volatile-vs-final UI path.
 
 ---
 

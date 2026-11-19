@@ -1729,7 +1729,7 @@ test("server options validate models, runtime paths, and reject unknown fields",
     { workerModel: { providerID: "", id: "m" } },
     { asrThreads: 0 },
     { ttsThreads: 257 },
-    { useGpu: "yes" },
+    { useGpu: true },
     { endpointing: "fast" },
     { endpointing: 1 },
   ]) {
@@ -1741,12 +1741,11 @@ test("server options validate models, runtime paths, and reject unknown fields",
       workerModel: { providerID: "p", id: "m", variant: "fast" },
       asrThreads: 2,
       ttsThreads: 3,
-      useGpu: false,
     }),
     {
       supervisorModel: { providerID: "p", id: "m", variant: "fast" },
       workerModel: { providerID: "p", id: "m", variant: "fast" },
-      runtime: { asrThreads: 2, ttsThreads: 3, useGpu: false },
+      runtime: { asrThreads: 2, ttsThreads: 3 },
     },
   );
   assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, { endpointing: "patient" });
@@ -1768,9 +1767,9 @@ test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.deepEqual(
     await Converse.methods.start.output["~standard"].validate({
       sessionID: "s",
-      runtime: { asrThreads: 2, useGpu: false },
+      runtime: { asrThreads: 2 },
     }),
-    { value: { sessionID: "s", runtime: { asrThreads: 2, useGpu: false } } },
+    { value: { sessionID: "s", runtime: { asrThreads: 2 } } },
   );
   assert.ok((await Converse.methods.stop.input["~standard"].validate({ sessionID: "" })).issues);
 });
@@ -2601,7 +2600,7 @@ test("start requires explicit supervisor and worker models and returns runtime o
     new Supervisor(f.ctx, { supervisorModel: f.model, runtime: {} }).start(),
     /workerModel/,
   );
-  const runtime = { asrThreads: 2, useGpu: false };
+  const runtime = { asrThreads: 2 };
   const started = await new Supervisor(f.ctx, {
     supervisorModel: f.model,
     workerModel: f.model,
