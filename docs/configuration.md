@@ -95,7 +95,7 @@ is never changed (OpenCode's prompt API has no per-prompt agent). Both hidden
 agents are absent from the normal agent picker and lists. The voice agent never
 owns other sessions: followed sessions (created or attached via `/converse-attach`
 or `converse_attach_session`) are tracked only in the plugin's storage, at most 16
-per conversation and one conversation per session, and are never marked or
+per conversation and one conversation per session (across all locations on the server; sessions in any known project or worktree may be followed, and a session that moves location must be attached again), and are never marked or
 modified. `/converse-detach` or `converse_detach_session` stops following one
 without touching its work; stopping the conversation detaches all. Sessions follow
 normal OpenCode permission behavior: the user approves or rejects requests on

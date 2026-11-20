@@ -1759,7 +1759,7 @@ test("worker ownership is checked again when a mutation enters the admission gat
     { sessionID: workerID, text: "queued behind admission" },
     supervisorID,
   );
-  const rejected = assert.rejects(mutation, /not followed by this conversation/);
+  const rejected = assert.rejects(mutation, /moved to another location/);
   await nextTick();
   const target = f.sessions.get(workerID);
   target.location = { directory: "/moved" };
@@ -2038,7 +2038,7 @@ test("worker paths and agents must be known, and moved workers lose authority", 
   target.location = { directory: "/other" };
   await assert.rejects(
     f.service.execute("interrupt_session", { sessionID: target.id }, sessionID),
-    /not followed by this conversation/,
+    /moved to another location/,
   );
 });
 
@@ -2133,7 +2133,7 @@ test("registered workers survive rolling discovery eviction with unchanged durab
   created.location = { directory: "/moved" };
   await assert.rejects(
     reloaded.execute("interrupt_session", { sessionID: created.id }, sessionID),
-    /not followed by this conversation/,
+    /moved to another location/,
   );
 });
 
@@ -3132,10 +3132,12 @@ test("attach_session follows an existing session without writing to it", async (
   const foreign = await f.ctx.session.create({
     location: { directory: "/another-project" },
   });
-  await assert.rejects(
-    f.service.execute("attach_session", { sessionID: foreign.id }, sessionID),
-    /location/,
+  const attachedForeign = JSON.parse(
+    await f.service.execute("attach_session", { sessionID: foreign.id }, sessionID),
   );
+  assert.equal(attachedForeign.directory, "/another-project");
+  assert.equal(attachedForeign.project, "another-project");
+  await f.service.execute("detach_session", { sessionID: foreign.id }, sessionID);
   const archived = await f.ctx.session.create({});
   archived.time = { ...archived.time, archived: 5 };
   await assert.rejects(
@@ -3665,4 +3667,148 @@ test("detaching a session drops its held updates", async () => {
 test("the idle report only reaches a live supervisor session of this owner", async () => {
   const f = fixture();
   await assert.rejects(f.service.setIdle("session-404", true));
+});
+
+function otherLocation(f, directory) {
+  const ctx = {
+    ...f.ctx,
+    location: { directory, project: { id: "project", canonical: directory } },
+    session: {
+      ...f.ctx.session,
+      create: async (input) =>
+        f.ctx.session.create({ ...input, location: input.location ?? { directory } }),
+    },
+  };
+  const service = eagerIdle(
+    new Supervisor(ctx, { supervisorModel: f.model, workerModel: f.model, runtime: {} }),
+    f.sessions,
+  );
+  return service;
+}
+
+test("a session in another project can be followed, prompted, announced, and released", async () => {
+  const f = fixture();
+  const { sessionID } = await f.service.start();
+  const foreign = await f.ctx.session.create({
+    title: "Elsewhere",
+    location: { directory: "/work/another-project" },
+  });
+  await f.service.attachForUser(sessionID, foreign.id);
+  assert.match(f.notices.at(-1).text, /another-project/);
+  await f.service.execute("send_message", { sessionID: foreign.id, text: "go" }, sessionID);
+  assert.equal(f.prompts.at(-1).sessionID, foreign.id);
+  const status = JSON.parse(
+    await f.service.execute("session_status", { sessionID: foreign.id }, sessionID),
+  );
+  assert.equal(status.directory, "/work/another-project");
+  await f.service.execute("interrupt_session", { sessionID: foreign.id }, sessionID);
+  assert.equal(f.interruptions.at(-1).sessionID, foreign.id);
+  await f.service.onEvent({
+    type: "session.execution.succeeded",
+    id: "foreign-done",
+    location: { directory: "/work/another-project" },
+    data: { sessionID: foreign.id },
+  });
+  const done = f.notices.at(-1).text;
+  assert.match(done, /"project":"another-project"/);
+  await f.service.setIdle(sessionID, true);
+  await f.service.onEvent({
+    type: "form.created",
+    id: "foreign-form",
+    location: { directory: "/work/another-project" },
+    data: { form: { sessionID: foreign.id, title: "Pick one", fields: [] } },
+  });
+  assert.match(f.notices.at(-1).text, /another-project/);
+  assert.match(f.notices.at(-1).text, /Pick one/);
+  // The conversation itself stays bound to its own location.
+  assert.equal(await f.service.isSupervisor(sessionID), true);
+  await f.service.detachForUser(sessionID, foreign.id);
+  assert.equal(f.storage.has(`workers/${foreign.id}`), false);
+});
+
+test("conversations in different locations exclude each other; inactive holders release", async () => {
+  const f = fixture();
+  const other = otherLocation(f, "/second");
+  const a = await f.service.start();
+  const b = await other.start();
+  const shared = await f.ctx.session.create({ location: { directory: "/third" } });
+  await f.service.execute("attach_session", { sessionID: shared.id }, a.sessionID);
+  await assert.rejects(
+    other.execute("attach_session", { sessionID: shared.id }, b.sessionID),
+    /already followed by another active Converse conversation/,
+  );
+  await assert.rejects(
+    other.execute("send_message", { sessionID: shared.id, text: "x" }, b.sessionID),
+    /not followed by this conversation/,
+  );
+  await other.setTurnOrigin(b.sessionID, "user");
+  await assert.rejects(
+    other.execute("take_over_session", { sessionID: shared.id }, b.sessionID),
+    /another conversation/,
+  );
+  // Events reach only the holder.
+  const before = f.notices.length;
+  await other.onEvent({
+    type: "session.execution.succeeded",
+    id: "x-other",
+    location: { directory: "/third" },
+    data: { sessionID: shared.id },
+  });
+  assert.equal(f.notices.length, before);
+  await f.service.stop(a.sessionID);
+  await other.execute("attach_session", { sessionID: shared.id }, b.sessionID);
+  assert.equal(f.storage.get(`workers/${shared.id}`).owner, other.owner);
+});
+
+test("a stale hold whose supervisor is gone or forged grants nothing and blocks nothing", async () => {
+  const f = fixture();
+  const a = await f.service.start();
+  const target = await f.ctx.session.create({ location: { directory: "/third" } });
+  // Forged record naming a nonexistent holder in another owner: not a live supervisor.
+  f.storage.set(`workers/${target.id}`, {
+    owner: JSON.stringify(["/elsewhere", null]),
+    supervisorID: "session-missing",
+    directory: "/third",
+  });
+  await assert.rejects(
+    f.service.execute("send_message", { sessionID: target.id, text: "x" }, a.sessionID),
+    /not followed by this conversation/,
+  );
+  await f.service.execute("attach_session", { sessionID: target.id }, a.sessionID);
+  // Old owner-scoped key format grants nothing.
+  const old = await f.ctx.session.create({ location: { directory: "/third" } });
+  f.storage.set(`workers/${encodeURIComponent(f.service.owner)}/${old.id}`, {
+    owner: f.service.owner,
+    supervisorID: a.sessionID,
+    directory: "/third",
+  });
+  await assert.rejects(
+    f.service.execute("send_message", { sessionID: old.id, text: "x" }, a.sessionID),
+    /not followed by this conversation/,
+  );
+  // A hold naming another owner cannot be used even with this conversation's supervisor ID.
+  const forged = await f.ctx.session.create({ location: { directory: "/third" } });
+  f.storage.set(`workers/${forged.id}`, {
+    owner: JSON.stringify(["/elsewhere", null]),
+    supervisorID: a.sessionID,
+    directory: "/third",
+  });
+  await assert.rejects(
+    f.service.execute("send_message", { sessionID: forged.id, text: "x" }, a.sessionID),
+    /not followed by this conversation/,
+  );
+});
+
+test("a followed session that moves location says so and can be attached again", async () => {
+  const f = fixture();
+  const a = await f.service.start();
+  const target = await f.ctx.session.create({ location: { directory: "/third" } });
+  await f.service.execute("attach_session", { sessionID: target.id }, a.sessionID);
+  target.location = { directory: "/fourth" };
+  await assert.rejects(
+    f.service.execute("send_message", { sessionID: target.id, text: "x" }, a.sessionID),
+    /moved to another location.*attach it again/,
+  );
+  await f.service.execute("attach_session", { sessionID: target.id }, a.sessionID);
+  await f.service.execute("send_message", { sessionID: target.id, text: "x" }, a.sessionID);
 });

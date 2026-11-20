@@ -1167,7 +1167,7 @@ export function createBridge(options: BridgeOptions) {
       }
     },
     stop,
-    /** Point the supervisor at an existing session inside this conversation's location. */
+    /** Point the supervisor at an existing session in any known project or worktree on this server. */
     async attach(targetSessionID: string, participantID?: string) {
       // Phase 2: only the user may reassign a followed session between agents.
       const lane = participantID ? lanes.find((l) => l.participant.id === participantID) : lanes[0];

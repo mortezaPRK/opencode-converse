@@ -196,9 +196,12 @@ interrupt it. Say "start a plan session about X" and it creates a new session wi
 that visible OpenCode agent (`converse_list_agents`); without one, the hidden
 `converse-worker` agent is used. An existing session's agent is never changed.
 To talk to an existing session, run `/converse-attach` while viewing it, or ask
-the supervisor to attach one from `converse_list_sessions`. Only sessions at the
-conversation's own location can be attached, never supervisor sessions or
-sessions another active conversation already follows. The voice agent never
+the supervisor to attach one from `converse_list_sessions`. Sessions in any known
+project or worktree on the same server can be attached (announcements name the
+project, since questions and permissions are answered in OpenCode there), never
+supervisor sessions, archived sessions, or sessions another active conversation,
+in any location, already follows. A followed session that moves to another
+location must be attached again. The voice agent never
 owns a session: attaching only reads it and records it in the plugin's own
 storage, sending nothing and changing no metadata, title, or agent. Followed
 sessions (attached or created) can be prompted, interrupted, and announced, and
