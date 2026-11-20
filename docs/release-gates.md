@@ -1,7 +1,10 @@
 # Release gates
 
-Do not publish the npm package or native bundles until these gates have evidence.
-Unit tests and compilation alone are not end-to-end host verification.
+The package and engines are published by `.github/workflows/release.yml`. Status:
+**verified on macOS arm64 with the OpenCode terminal and Desktop; open for Linux x64
+and Windows x64**, whose engines are built and published but untested on real
+devices. Gates below that lack evidence stay open. Unit tests and compilation alone
+are not end-to-end host verification.
 
 ## Host and platform matrix
 
@@ -116,5 +119,6 @@ architectures are not implied by operating-system support.
   verifies, and starts the engine without a compiler or Node build step, and that
   `npm pack` ships no engine binary.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.
-- Public repository name/ownership, signing identities, and publication are
-  separate explicit actions. No workflow in this repository publishes releases.
+- Signing identities (macOS signing/notarization, Windows code signing) are not set
+  up; the published engines are unsigned. Publication runs through the manual
+  release workflow (see CONTRIBUTING.md); the license review above remains open.

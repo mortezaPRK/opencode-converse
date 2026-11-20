@@ -92,6 +92,5 @@ Models are downloaded separately, never included in the npm source package:
 
 Before distributing native prebuilts or models, collect the corresponding
 copyright/license notices and review redistribution obligations, especially
-the exact shipped artifacts. This change provides explicit source builds, not prebuilt
-native redistribution, and does not claim all dependencies are MIT. There is no
-blanket clearance; exact-artifact review remains required.
+the exact shipped artifacts. Release engines carry this inventory. It does not claim
+all dependencies are MIT, and an exact-artifact review has not been completed.

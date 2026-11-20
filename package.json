@@ -1,9 +1,12 @@
 {
   "name": "@mortz.prk/opencode-converse",
-  "version": "0.7.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "A local, Rust-powered live voice supervisor for OpenCode.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mortezaPRK/opencode-converse.git"
+  },
   "files": [
     "dist",
     "LICENSE",
@@ -32,7 +35,8 @@
     }
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "build": "tsc && vite build",
@@ -49,6 +53,7 @@
     "engine:stage": "node native/scripts/stage.mjs",
     "engine:test": "cargo test --manifest-path native/Cargo.toml -p opencode-converse --locked",
     "engine:models": "cargo run --manifest-path native/Cargo.toml -p opencode-converse --locked -- models install",
+    "version:set": "node scripts/set-version.mjs",
     "engine:fmt": "cargo fmt --manifest-path native/Cargo.toml --all --check",
     "prepack": "npm run build"
   },

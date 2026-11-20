@@ -4,12 +4,42 @@ A local voice supervisor for OpenCode. Talk to a dedicated supervisor, delegate
 work to sessions, and hear progress while keeping speech processing on your
 machine.
 
-**Development preview.** The source targets OpenCode terminal and Desktop on
-macOS, Linux, and Windows. Native packaging, real-device testing on all three
-systems, and exact-artifact license review are release gates—not completed
-support claims. The package has not been published.
+Tested with the OpenCode terminal and Desktop on macOS with Apple silicon.
+Engines for Linux x64 and Windows x64 are built and published with each release
+but have not been tested on real devices.
 
 The current SDK target is OpenCode **2.3.0**.
+
+## Install
+
+Add the package to your global `opencode.jsonc` (supervisor and worker models are
+required; see [configuration](docs/configuration.md)):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-converse",
+      "options": {
+        "supervisorModel": "provider/supervisor-model",
+        "workerModel": "provider/worker-model",
+      },
+    },
+  ],
+}
+```
+
+On first start the plugin downloads this version's engine from its GitHub release
+and verifies it against the pinned size and SHA-256. Then install the speech
+models once, with the engine path shown in the error or listed under
+[Develop](#develop) (`<state>/bin/<version>/opencode-converse models install`).
+A prerelease built from a pull request can be installed as
+`@mortz.prk/opencode-converse@<version>`; see [CONTRIBUTING](CONTRIBUTING.md).
+
+Engines are published for macOS on Apple silicon, Linux x64 and Windows x64.
+Linux needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 or later) and
+ALSA (`libasound2`). Windows needs the Microsoft Visual C++ x64 Redistributable.
 
 ## Design
 
@@ -219,5 +249,7 @@ matrix.
 
 Project source is MIT licensed; retained notices are in [LICENSE](LICENSE).
 Native libraries and model assets have separate terms. See
-[THIRD_PARTY.md](THIRD_PARTY.md). No native binary release is cleared for
-redistribution merely because its source builds.
+[THIRD_PARTY.md](THIRD_PARTY.md). Engine releases ship the notices in
+`native/THIRD_PARTY.md`. Speech model files are not redistributed: you download
+them from their upstream sources under their own licenses. No exact-artifact
+license review of the native binaries or models has been completed.

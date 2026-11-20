@@ -1601,7 +1601,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opencode-converse"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -2878,7 +2878,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "ve-asr"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ort",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "ve-audio"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "ve-tts"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ptts",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "ve-turn"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ort",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "ve-vad"
-version = "0.7.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ort",
