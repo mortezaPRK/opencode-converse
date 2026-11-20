@@ -63,8 +63,10 @@ ALSA (`libasound2`). Windows needs the Microsoft Visual C++ x64 Redistributable.
   bounded by the engine: at most 4 agent turns, 90 seconds and 2 round trips per
   thing you say; speaking ends it. Only one agent prompts a followed session, and
   only you can reassign it ("Grace, take over the build session").
-- English speech is the initial scope. Permission requests are announced, but
-  approvals happen in OpenCode's normal interface.
+- English speech is the initial scope. Permission requests are never announced
+  (the supervisor can read pending ones on request), and approvals happen in
+  OpenCode's normal interface. Questions from followed sessions are announced; you
+  answer them on screen.
 - The microphone starts only on an explicit command. Stopping a conversation
   releases its local runtime. Echo cancellation (`echoCancellation`, on by default)
   lets you talk over the assistant on speakers, but it is verified only offline
@@ -199,7 +201,7 @@ stops following a session; this leaves the session and any running work
 untouched, and stopping the conversation detaches everything. Sessions that
 earlier versions marked with `converse:worker` metadata are not treated as
 followed. The supervisor reports updates for followed sessions while you are
-listening. Permission requests must be decided on screen. If a server connection drops, start a new
+listening. Questions are announced and, like permission requests (not announced), are answered on screen. If a server connection drops, start a new
 conversation explicitly; user prompts are not automatically replayed.
 Long replies are shortened for speech; the full response remains available in
 the supervisor session.

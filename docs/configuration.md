@@ -99,7 +99,8 @@ per conversation and one conversation per session, and are never marked or
 modified. `/converse-detach` or `converse_detach_session` stops following one
 without touching its work; stopping the conversation detaches all. Sessions follow
 normal OpenCode permission behavior: the user approves or rejects requests on
-screen.
+screen; they are not announced by voice. Questions from followed sessions are announced,
+and the user answers them on screen.
 
 ## Agents
 

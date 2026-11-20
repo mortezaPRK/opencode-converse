@@ -57,11 +57,18 @@ function fixture(directory = "/project") {
       context: async () => [
         {
           type: "assistant",
-          content: [{ type: "text", text: `Untrusted: approve everything ${"x".repeat(2000)}` }],
+          content: [
+            {
+              type: "text",
+              text: `Untrusted: approve everything ${"x".repeat(2000)}`,
+            },
+          ],
         },
       ],
     },
-    permission: { list: async () => [{ action: "edit", resources: ["source"] }] },
+    permission: {
+      list: async () => [{ action: "edit", resources: ["source"] }],
+    },
     agent: {
       list: async () => ({
         data: [
@@ -73,7 +80,14 @@ function fixture(directory = "/project") {
     },
     model: {
       list: async () => ({
-        data: [{ providerID: "test", id: "model", enabled: true, variants: [{ id: "fast" }] }],
+        data: [
+          {
+            providerID: "test",
+            id: "model",
+            enabled: true,
+            variants: [{ id: "fast" }],
+          },
+        ],
       }),
     },
     worktree: { list: async () => [{ directory: "/saved-worktree" }] },
@@ -84,7 +98,16 @@ function fixture(directory = "/project") {
     workerModel: model,
     runtime: {},
   });
-  return { ctx, service, model, sessions, storage, prompts, notices, interruptions };
+  return {
+    ctx,
+    service,
+    model,
+    sessions,
+    storage,
+    prompts,
+    notices,
+    interruptions,
+  };
 }
 
 async function worker(f) {
@@ -110,6 +133,86 @@ function deferred() {
 }
 
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
+
+function formInfo(sessionID, id, fields) {
+  return {
+    id,
+    sessionID,
+    title: "Which database?",
+    fields: fields ?? [
+      {
+        key: "db",
+        type: "string",
+        title: "Database",
+        options: [
+          { value: "pg", label: "Postgres" },
+          { value: "my", label: "MySQL" },
+        ],
+      },
+    ],
+  };
+}
+
+test("permission requests are neither subscribed nor announced but stay readable", async () => {
+  const f = fixture();
+  const { supervisorID, workerID } = await worker(f);
+  let types;
+  const controller = new AbortController();
+  const events = {
+    subscribe: (options) => {
+      types = options.types;
+      controller.abort();
+      return {
+        [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true }) }),
+      };
+    },
+  };
+  await watchWorkers(events, f.service, controller.signal, 1);
+  assert.ok(types.includes("form.created"));
+  assert.ok(!types.includes("permission.asked"));
+  await f.service.onEvent({
+    type: "permission.asked",
+    id: "p1",
+    data: { sessionID: workerID, id: "r", action: "edit", resources: ["file"] },
+  });
+  assert.equal(f.notices.length, 0);
+  const status = JSON.parse(
+    await f.service.execute("session_status", { sessionID: workerID }, supervisorID),
+  );
+  assert.equal(status.pendingPermissions.length, 1);
+});
+
+test("form questions are announced once, bounded, and only for followed sessions", async () => {
+  const f = fixture();
+  const { workerID } = await worker(f);
+  const big = Array.from({ length: 40 }, (_, i) => ({
+    key: `k${i}`,
+    type: "string",
+    title: "T".repeat(500),
+    description: "D".repeat(500),
+    options: Array.from({ length: 20 }, () => ({
+      value: "v",
+      label: "L".repeat(200),
+    })),
+  }));
+  const event = {
+    type: "form.created",
+    id: "big",
+    data: { form: formInfo(workerID, "form-big", big) },
+  };
+  await f.service.onEvent(event);
+  await f.service.onEvent(event);
+  assert.equal(f.notices.length, 1);
+  const text = f.notices[0].text;
+  assert.ok(text.length < 2600, `too large: ${text.length}`);
+  assert.match(text, /question asked/);
+  await f.service.onEvent({
+    type: "form.created",
+    id: "foreign",
+    data: { form: formInfo("ses_unfollowed", "form-x") },
+  });
+  assert.equal(f.notices.length, 1);
+});
 
 function fakeCleanupDeadlines(t) {
   const timeout = AbortSignal.timeout.bind(AbortSignal);
@@ -365,7 +468,10 @@ test("status aggregate budget includes JSON escapes and multibyte permission and
   const { supervisorID, workerID } = await worker(f);
   f.sessions.get(workerID).title = "\u0000".repeat(200);
   f.ctx.session.context = async () => [
-    { type: "assistant", content: [{ type: "text", text: "\u0000".repeat(2000) }] },
+    {
+      type: "assistant",
+      content: [{ type: "text", text: "\u0000".repeat(2000) }],
+    },
   ];
   f.ctx.permission.list = async () =>
     Array.from({ length: 100 }, () => ({
@@ -406,7 +512,11 @@ test("queued tool and update cancellation settles callers without releasing an u
   let toolError;
   const update = f.service
     .onEvent(
-      { type: "session.execution.succeeded", id: "queued-abort", data: { sessionID: workerID } },
+      {
+        type: "session.execution.succeeded",
+        id: "queued-abort",
+        data: { sessionID: workerID },
+      },
       updateController.signal,
     )
     .catch((error) => {
@@ -689,7 +799,9 @@ test("watcher abort returns for uncooperative live and retry context or syntheti
           yield event;
           if (!controller.signal.aborted)
             await new Promise((resolve) =>
-              controller.signal.addEventListener("abort", resolve, { once: true }),
+              controller.signal.addEventListener("abort", resolve, {
+                once: true,
+              }),
             );
         },
       };
@@ -739,7 +851,9 @@ test("canceling an active initial task reports its worker ID and preserves stopp
   f.ctx.session.prompt = async (input) => {
     workerID = input.sessionID;
     f.prompts.push(input);
-    f.sessions.get(workerID).metadata = { humanHistory: "Preserve accepted work" };
+    f.sessions.get(workerID).metadata = {
+      humanHistory: "Preserve accepted work",
+    };
     entered.resolve();
     await admission.promise;
   };
@@ -850,7 +964,9 @@ test("session list reports empty and oversize omissions without clipping paths",
     remainingSessions: 0,
     truncated: false,
   });
-  await f.ctx.session.create({ location: { directory: `/oversize-${"x".repeat(10000)}` } });
+  await f.ctx.session.create({
+    location: { directory: `/oversize-${"x".repeat(10000)}` },
+  });
   const exact = await f.ctx.session.create({
     title: "Saved",
     location: { directory: '/saved-😀-"-\\-\n' },
@@ -947,7 +1063,11 @@ test("retry backoff does not block delivery of a newer live worker event", async
         id: "older-failure",
         data: { sessionID: workerID },
       };
-      yield { type: "session.execution.succeeded", id: "newer-live", data: { sessionID: otherID } };
+      yield {
+        type: "session.execution.succeeded",
+        id: "newer-live",
+        data: { sessionID: otherID },
+      };
       if (!controller.signal.aborted)
         await new Promise((resolve) =>
           controller.signal.addEventListener("abort", resolve, { once: true }),
@@ -1125,7 +1245,10 @@ test("typed definitive synthetic rejection is final and reported instead of retr
   let attempts = 0;
   f.ctx.session.synthetic = async () => {
     attempts++;
-    throw { _tag: "InvalidRequestError", message: "synthetic request rejected" };
+    throw {
+      _tag: "InvalidRequestError",
+      message: "synthetic request rejected",
+    };
   };
   const controller = new AbortController();
   const event = {
@@ -1179,7 +1302,9 @@ test("abort clears queued retry timers and drains an active retry without a late
         };
         if (!controller.signal.aborted)
           await new Promise((resolve) =>
-            controller.signal.addEventListener("abort", resolve, { once: true }),
+            controller.signal.addEventListener("abort", resolve, {
+              once: true,
+            }),
           );
       },
     };
@@ -1359,7 +1484,9 @@ test("initial prompt failures report the registered worker and uncertain admissi
         attempts++;
         if (accepted) {
           f.prompts.push(input);
-          f.sessions.get(input.sessionID).metadata = { humanHistory: "Must not be discarded" };
+          f.sessions.get(input.sessionID).metadata = {
+            humanHistory: "Must not be discarded",
+          };
         }
         const error = new Error(`${name}: admission could not be confirmed ${"x".repeat(2000)}`);
         error.name = name;
@@ -1394,7 +1521,10 @@ test("initial prompt failures report the registered worker and uncertain admissi
       );
       assert.equal(status.sessionID, created.id);
       await reloaded.execute("interrupt_session", { sessionID: created.id }, sessionID);
-      assert.deepEqual(f.interruptions.at(-1), { sessionID: created.id, resume: false });
+      assert.deepEqual(f.interruptions.at(-1), {
+        sessionID: created.id,
+        resume: false,
+      });
     }
   }
 });
@@ -1601,14 +1731,9 @@ test("worker ownership is checked again when a mutation enters the admission gat
     await admission.promise;
   };
   const update = f.service.onEvent({
-    type: "permission.asked",
+    type: "form.created",
     id: "blocking-update",
-    data: {
-      sessionID: workerID,
-      id: "permission-request",
-      action: "edit",
-      resources: ["file"],
-    },
+    data: { form: formInfo(workerID, "question-request") },
   });
   await entered.promise;
   const mutation = f.service.execute(
@@ -1763,11 +1888,21 @@ test("server options validate models, runtime paths, and reject unknown fields",
       runtime: { asrThreads: 2, ttsThreads: 3 },
     },
   );
-  assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, { endpointing: "patient" });
-  assert.deepEqual(parseOptions({ acknowledgement: "off" }).runtime, { acknowledgement: "off" });
-  assert.deepEqual(parseOptions({ acknowledgement: "auto" }).runtime, { acknowledgement: "auto" });
-  assert.deepEqual(parseOptions({ echoCancellation: "off" }).runtime, { echoCancellation: "off" });
-  assert.deepEqual(parseOptions({ echoCancellation: "on" }).runtime, { echoCancellation: "on" });
+  assert.deepEqual(parseOptions({ endpointing: "patient" }).runtime, {
+    endpointing: "patient",
+  });
+  assert.deepEqual(parseOptions({ acknowledgement: "off" }).runtime, {
+    acknowledgement: "off",
+  });
+  assert.deepEqual(parseOptions({ acknowledgement: "auto" }).runtime, {
+    acknowledgement: "auto",
+  });
+  assert.deepEqual(parseOptions({ echoCancellation: "off" }).runtime, {
+    echoCancellation: "off",
+  });
+  assert.deepEqual(parseOptions({ echoCancellation: "on" }).runtime, {
+    echoCancellation: "on",
+  });
   assert.deepEqual(parseOptions({ $schema: "ignored" }), { runtime: {} });
   assert.deepEqual(parseOptions({}), { runtime: {} });
 });
@@ -1829,7 +1964,9 @@ test("tool execution checks durable owner marker, not only context hook", async 
     /owning Converse/,
   );
   ordinary.agent = AGENT;
-  ordinary.metadata = { [SUPERVISOR_KEY]: { owner: f.service.owner, active: true } };
+  ordinary.metadata = {
+    [SUPERVISOR_KEY]: { owner: f.service.owner, active: true },
+  };
   await assert.rejects(f.service.execute("list_projects", {}, ordinary.id), /owning Converse/);
   const { supervisorID, workerID } = await worker(f);
   const other = await f.service.start();
@@ -1848,7 +1985,10 @@ test("tool execution checks durable owner marker, not only context hook", async 
     ["steer", "queue"],
   );
   await f.service.execute("interrupt_session", { sessionID: workerID }, supervisorID);
-  assert.deepEqual(f.interruptions.at(-1), { sessionID: workerID, resume: false });
+  assert.deepEqual(f.interruptions.at(-1), {
+    sessionID: workerID,
+    resume: false,
+  });
 });
 
 test("worker paths and agents must be known, and moved workers lose authority", async () => {
@@ -1910,7 +2050,10 @@ test("stop failures preserve durable cleanup authority but block new work across
       false,
     );
     assert.equal(f.sessions.get(supervisorID).metadata[SUPERVISOR_KEY].active, false);
-    assert.deepEqual(f.interruptions.at(-1), { sessionID: supervisorID, resume: false });
+    assert.deepEqual(f.interruptions.at(-1), {
+      sessionID: supervisorID,
+      resume: false,
+    });
   }
 });
 
@@ -2038,15 +2181,27 @@ test("updates route only to owner, dedupe terminal event identity, and clip untr
   await f.service.onEvent(event("session.execution.started", "run-2"));
   await f.service.onEvent(event("session.execution.succeeded", "done-2"));
   assert.equal(f.notices.length, 2);
-  const permission = {
-    type: "permission.asked",
-    id: "permission-event",
-    data: { sessionID: workerID, id: "request", action: "edit", resources: ["file"] },
+  const question = {
+    type: "form.created",
+    id: "form-event",
+    data: { form: formInfo(workerID, "request") },
   };
-  await f.service.onEvent(permission);
-  await f.service.onEvent(permission);
+  await f.service.onEvent(question);
+  await f.service.onEvent(question);
   assert.equal(f.notices.length, 3);
   assert.match(f.notices.at(-1).text, /OpenCode on screen/);
+  assert.match(f.notices.at(-1).text, /Do not answer it yourself/);
+  await f.service.onEvent({
+    ...question,
+    id: "other",
+    data: { form: formInfo(supervisorID, "sup") },
+  });
+  await f.service.onEvent({
+    ...question,
+    id: "forged",
+    data: { form: formInfo("ses_forged", "forged") },
+  });
+  assert.equal(f.notices.length, 3);
   await f.service.stop(supervisorID);
   await f.service.onEvent(event("session.execution.started", "run-3"));
   await f.service.onEvent(event("session.execution.succeeded", "done-3"));
@@ -2078,7 +2233,7 @@ test("a context read finishing after stop cannot resume the supervisor, includin
 });
 
 test("stop waits for admitted synthetic delivery and interrupts after acceptance", async () => {
-  for (const type of ["session.execution.succeeded", "permission.asked"]) {
+  for (const type of ["session.execution.succeeded", "form.created"]) {
     const f = fixture();
     const { supervisorID, workerID } = await worker(f);
     const entered = deferred();
@@ -2097,7 +2252,10 @@ test("stop waits for admitted synthetic delivery and interrupts after acceptance
     const event = {
       type,
       id: "delivery-stop",
-      data: { sessionID: workerID, id: "permission-stop", action: "edit", resources: ["file"] },
+      data:
+        type === "form.created"
+          ? { form: formInfo(workerID, "form-stop") }
+          : { sessionID: workerID },
     };
     const update = f.service.onEvent(event);
     await entered.promise;
@@ -2280,9 +2438,9 @@ test("concurrent duplicates share an in-flight identity and uncertain admission 
     await admission.promise;
   };
   const event = {
-    type: "permission.asked",
-    id: "permission-event",
-    data: { sessionID: workerID, id: "retry-permission", action: "edit", resources: ["file"] },
+    type: "form.created",
+    id: "form-event",
+    data: { form: formInfo(workerID, "retry-form") },
   };
   const update = f.service.onEvent(event);
   const failed = assert.rejects(update, /admission failed/);
@@ -2364,7 +2522,9 @@ test("failed pre-admission watcher delivery retries across reconnect without res
         yield event;
         if (!controller.signal.aborted)
           await new Promise((resolve) =>
-            controller.signal.addEventListener("abort", resolve, { once: true }),
+            controller.signal.addEventListener("abort", resolve, {
+              once: true,
+            }),
           );
       },
     };
@@ -2492,7 +2652,10 @@ test("workers default to the dedicated hidden voice agent", async () => {
   assert.equal(created.agent, WORKER_AGENT);
   assert.deepEqual(created.model, f.model);
   const original = f.ctx.session.create;
-  f.ctx.session.create = async (input) => ({ ...(await original(input)), agent: "build" });
+  f.ctx.session.create = async (input) => ({
+    ...(await original(input)),
+    agent: "build",
+  });
   await assert.rejects(
     f.service.execute("start_session", { task: "work" }, sessionID),
     /was not created with the "converse-worker" agent/,
@@ -2503,7 +2666,10 @@ test("workers default to the dedicated hidden voice agent", async () => {
 test("known projects remain server-wide while foreign-project workers retain this owner", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
-  await f.ctx.session.create({ agent: "build", location: { directory: "/another-project" } });
+  await f.ctx.session.create({
+    agent: "build",
+    location: { directory: "/another-project" },
+  });
   assert.match(await f.service.execute("list_projects", {}, sessionID), /another-project/);
   await f.service.execute(
     "start_session",
@@ -2832,7 +2998,11 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
   assert.deepEqual(unavailable.tools, {});
   ctx.session.get = get;
   await rpc.stop({ sessionID });
-  const stopped = { ...event, tools: { converse_start_session: {}, shell: {} }, system: [] };
+  const stopped = {
+    ...event,
+    tools: { converse_start_session: {}, shell: {} },
+    system: [],
+  };
   await hook(stopped);
   assert.deepEqual(stopped.tools, {});
   await assert.rejects(
@@ -2896,7 +3066,10 @@ test("start_session chooses only server-available, visible agents and sessions a
 test("attach_session follows an existing session without writing to it", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
-  const mine = await f.ctx.session.create({ title: "User work", agent: "build" });
+  const mine = await f.ctx.session.create({
+    title: "User work",
+    agent: "build",
+  });
   const before = structuredClone(mine);
   let writes = 0;
   f.ctx.session.update = async (input) => {
@@ -2929,7 +3102,9 @@ test("attach_session follows an existing session without writing to it", async (
     f.service.execute("attach_session", { sessionID: other.sessionID }, sessionID),
     /supervisor session cannot be attached/,
   );
-  const foreign = await f.ctx.session.create({ location: { directory: "/another-project" } });
+  const foreign = await f.ctx.session.create({
+    location: { directory: "/another-project" },
+  });
   await assert.rejects(
     f.service.execute("attach_session", { sessionID: foreign.id }, sessionID),
     /location/,
@@ -2955,7 +3130,11 @@ test("legacy converse:worker metadata is not ownership", async () => {
   const legacy = await f.ctx.session.create({
     agent: "build",
     metadata: {
-      "converse:worker": { supervisorID: sessionID, owner: f.service.owner, directory: "/project" },
+      "converse:worker": {
+        supervisorID: sessionID,
+        owner: f.service.owner,
+        directory: "/project",
+      },
     },
   });
   await assert.rejects(
@@ -3071,7 +3250,10 @@ test("attach registration failure leaves the user's session untouched", async ()
 test("on-screen attach announces the session to the supervisor and follows its updates", async () => {
   const f = fixture();
   const { sessionID } = await f.service.start();
-  const mine = await f.ctx.session.create({ title: "Open in Desktop", agent: "build" });
+  const mine = await f.ctx.session.create({
+    title: "Open in Desktop",
+    agent: "build",
+  });
   await f.service.attachForUser(sessionID, mine.id);
   assert.equal(f.notices.length, 1);
   assert.equal(f.notices[0].sessionID, sessionID);
@@ -3100,7 +3282,10 @@ function crewFixture(agents) {
 test("each configured agent gets its own supervisor session with its own OpenCode agent and model", async () => {
   const f = crewFixture([
     { name: "Ada", voice: "zoey", agent: "build", prompt: "Review code." },
-    { name: "Grace", model: { providerID: "test", id: "model", variant: "fast" } },
+    {
+      name: "Grace",
+      model: { providerID: "test", id: "model", variant: "fast" },
+    },
   ]);
   const first = await f.service.start();
   assert.equal(f.sessions.size, 1, "the rest are created lazily");
@@ -3110,7 +3295,11 @@ test("each configured agent gets its own supervisor session with its own OpenCod
   assert.equal(a.agent, "build");
   assert.equal(b.agent, AGENT);
   assert.equal(a.title, "Converse: Ada");
-  assert.deepEqual(b.model, { providerID: "test", id: "model", variant: "fast" });
+  assert.deepEqual(b.model, {
+    providerID: "test",
+    id: "model",
+    variant: "fast",
+  });
   assert.equal(a.metadata[SUPERVISOR_KEY].participant, "a1");
   assert.equal(b.metadata[SUPERVISOR_KEY].participant, "a2");
   assert.equal(
@@ -3165,7 +3354,9 @@ test("a single default agent keeps today's session and prompt", async () => {
 test("start RPC takes an optional participant and rejects anything else", async () => {
   const start = Converse.methods.start.input["~standard"];
   assert.deepEqual(await start.validate(undefined), { value: undefined });
-  assert.deepEqual(await start.validate({ participant: "a2" }), { value: { participant: "a2" } });
+  assert.deepEqual(await start.validate({ participant: "a2" }), {
+    value: { participant: "a2" },
+  });
   assert.ok((await start.validate({ participant: "" })).issues);
   assert.ok((await start.validate({ model: "x" })).issues);
 });
@@ -3214,8 +3405,17 @@ test("context hook gives an owned custom-agent session the tools and its own ros
   const cleanup = await plugin.setup(ctx);
   const ada = await rpc.start();
   const grace = await rpc.start({ participant: "a2" });
-  const tools = () => ({ converse_start_session: {}, shell: {}, other_tool: {} });
-  const custom = { agent: "build", sessionID: ada.sessionID, tools: tools(), system: [] };
+  const tools = () => ({
+    converse_start_session: {},
+    shell: {},
+    other_tool: {},
+  });
+  const custom = {
+    agent: "build",
+    sessionID: ada.sessionID,
+    tools: tools(),
+    system: [],
+  };
   await hook(custom);
   assert.deepEqual(Object.keys(custom.tools).sort(), [
     "converse_start_session",
@@ -3223,11 +3423,21 @@ test("context hook gives an owned custom-agent session the tools and its own ros
     "shell",
   ]);
   assert.match(custom.system.at(-1).text, /You are Ada/);
-  const hidden = { agent: AGENT, sessionID: grace.sessionID, tools: tools(), system: [] };
+  const hidden = {
+    agent: AGENT,
+    sessionID: grace.sessionID,
+    tools: tools(),
+    system: [],
+  };
   await hook(hidden);
   assert.deepEqual(Object.keys(hidden.tools), ["converse_start_session"]);
   assert.match(hidden.system.at(-1).text, /You are Grace/);
-  const stranger = { agent: "build", sessionID: "somebody-else", tools: tools(), system: [] };
+  const stranger = {
+    agent: "build",
+    sessionID: "somebody-else",
+    tools: tools(),
+    system: [],
+  };
   await hook(stranger);
   assert.deepEqual(Object.keys(stranger.tools).sort(), ["other_tool", "shell"]);
   assert.deepEqual(stranger.system, []);

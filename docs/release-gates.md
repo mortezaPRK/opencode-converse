@@ -32,6 +32,7 @@ architectures are not implied by operating-system support.
   indicator. Speaker playback remains independent.
 - Late generation results and interrupted reply chunks cannot restart speech.
 - Worker/project data cannot make the model approve a permission request.
+- Permission requests are never announced; pending ones stay readable through `converse_session_status`. Questions (`form.created`) from followed sessions are announced once, bounded, and never answered by tools.
 - Engine and speech-model paths are fixed under the app state folder. No plugin
   option or environment variable can redirect them. This version's engine is downloaded
   once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions (and installed automatically after the engine on first start, with the download cache cleaned afterwards); device
