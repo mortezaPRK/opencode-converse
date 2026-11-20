@@ -31,11 +31,11 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: 26
           cache: npm
@@ -110,12 +110,12 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 0
           # Stable releases push to main with the release token; everything else uses the job token.
           token: ${{ needs.prepare.outputs.mode == 'stable' && !inputs.dry_run && secrets.RELEASE_PAT || github.token }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: 26
           registry-url: https://registry.npmjs.org
@@ -124,7 +124,7 @@ jobs:
       - run: node scripts/set-version.mjs "$VERSION"
       - run: npm ci
       - run: npm run build
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@v4.3.0
         with:
           pattern: engine-*
           path: engines
