@@ -47,7 +47,7 @@ The source setup uses these components, among others:
 - **webrtc-audio-processing 2.1.0** (`webrtc-audio-processing-sys` + wrapper +
   `webrtc-audio-processing-config`, tonarino; `license-file = COPYING`, BSD-3-Clause,
   identical to WebRTC's): echo cancellation (AEC3) and high-pass filter, statically
-  linked via the `bundled` feature (about 29 MB static archive before linking). Its
+  linked via the `bundled` feature (a local copy under `native/vendor/` carries an MSVC build patch to `build.rs`; see its `README.opencode.md`) (about 29 MB static archive before linking). Its
   vendored sources and the notices to preserve in a binary distribution:
   - WebRTC (`webrtc/LICENSE`, BSD-3, Copyright (c) 2011 The WebRTC project authors)
     and the WebRTC Additional IP Rights Grant (Patents) in `webrtc/PATENTS`.

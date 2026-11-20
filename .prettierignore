@@ -4,3 +4,4 @@ native/target/
 node_modules/
 dist/
 artifacts/
+native/vendor/

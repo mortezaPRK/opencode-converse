@@ -41,8 +41,8 @@ The current SDK target is OpenCode **2.3.0**.
 
 ## Develop
 
-Use Node.js 26 and Rust. Native inference builds additionally require CMake, a
-C/C++ compiler, and libclang. Linux builds need ALSA development headers and
+Use Node.js 26 and Rust. Native inference builds additionally require CMake, meson,
+ninja, a C/C++ compiler, and libclang. Linux builds need ALSA development headers and
 `pkg-config`. Windows native builds require MSVC and the Windows SDK.
 
 ```sh
