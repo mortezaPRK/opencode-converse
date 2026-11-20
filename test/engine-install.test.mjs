@@ -195,8 +195,8 @@ test("manifest is validated strictly", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-  // The committed placeholder is valid and empty.
-  assert.deepEqual(readEngineManifest(repo), {});
+  // The committed manifest (an empty placeholder, or the release's engines) is valid.
+  assert.doesNotThrow(() => readEngineManifest(repo));
 });
 
 test("an existing complete install is reused without the network", async () => {
