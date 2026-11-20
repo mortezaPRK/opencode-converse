@@ -1,4 +1,20 @@
 {
   "version": "0.1.0",
-  "engines": {}
+  "engines": {
+    "darwin-arm64": {
+      "file": "opencode-converse-0.1.0-darwin-arm64",
+      "bytes": 43596960,
+      "sha256": "c0e169fc74803595f6d0cfd15c8c94fbb25af567289f9a9d7714743ca488de47"
+    },
+    "linux-x64": {
+      "file": "opencode-converse-0.1.0-linux-x64",
+      "bytes": 51099016,
+      "sha256": "938c697a50de4b25bdf1f483589b84d7a79db66a6ba7f3c12f8e2626eaec9a16"
+    },
+    "win32-x64": {
+      "file": "opencode-converse-0.1.0-win32-x64.exe",
+      "bytes": 38001152,
+      "sha256": "6b3674ce858398e733ce7c84a12dee2006c19de3b1bd095e47a3cb33ae734224"
+    }
+  }
 }
