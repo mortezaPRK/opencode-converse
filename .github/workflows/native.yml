@@ -91,6 +91,8 @@ jobs:
           CC: cl
           CXX: cl
           CARGO_TARGET_DIR: C:\t
+          # bindgen's libclang can be older than the runner's MSVC STL requires.
+          BINDGEN_EXTRA_CLANG_ARGS: -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
         run: node native/scripts/build.mjs
       - name: Stage executable
         shell: bash

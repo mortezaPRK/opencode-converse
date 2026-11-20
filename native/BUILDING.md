@@ -34,7 +34,10 @@ a minimum deployment target of 13.4 for the downloaded ONNX Runtime archive.
   glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+). At runtime ALSA (`libasound2`) must be installed.
 - Windows: run from a Visual Studio developer environment with `CC=cl CXX=cl` so meson does not
   pick MinGW, plus libclang (LLVM). Use a short target dir (for example `CARGO_TARGET_DIR=C:\t`):
-  abseil's paths exceed MAX_PATH otherwise. `webrtc-audio-processing-sys` is patched locally
+  abseil's paths exceed MAX_PATH otherwise. If libclang is older than your MSVC STL accepts
+  (`STL1000: Unexpected compiler version`), set
+  `BINDGEN_EXTRA_CLANG_ARGS=-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH`, as CI does.
+  `webrtc-audio-processing-sys` is patched locally
   (`native/vendor/`, see its `README.opencode.md`) because upstream 2.1.0 does not build with MSVC.
 - Windows C runtime: dynamic (`/MD`) everywhere. Pyke's prebuilt ONNX Runtime for
   `x86_64-pc-windows-msvc` is compiled with `RuntimeLibrary=MD_DynamicRelease` and enforces it with
