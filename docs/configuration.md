@@ -102,6 +102,18 @@ normal OpenCode permission behavior: the user approves or rejects requests on
 screen; they are not announced by voice. Questions from followed sessions are announced,
 and the user answers them on screen.
 
+Updates (completions, failures, questions) are held in a bounded per-conversation
+buffer and handed to the agent only when the engine reports the conversation idle:
+no turn running, nothing playing, queued or acknowledged, you are not speaking, and
+output is neither muted nor paused (muting drops announcements and pausing holds
+them, so updates wait for you instead of being consumed silently). Per followed
+session only the latest state is kept (a later completion replaces an earlier
+one); questions are kept individually. At most 24 are held and the combined message
+is size-bounded; older ones are folded into a "moreUpdates" count, never dropped
+silently. They are delivered in one queued message, so a speech in progress is never
+cut and a user turn always goes first. Updates for a stopped conversation are
+discarded.
+
 ## Agents
 
 `agents` defines the conversation's named voice agents. It is optional: without it

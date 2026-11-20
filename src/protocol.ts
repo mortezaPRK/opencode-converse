@@ -1,5 +1,5 @@
 /** The single stdio contract. Both ends must use exactly this protocol version. */
-export const PROTOCOL_VERSION = 3 as const;
+export const PROTOCOL_VERSION = 4 as const;
 
 export type VoiceStatus =
   | "off"
@@ -41,12 +41,17 @@ export type Acknowledgement = "auto" | "off";
 export type EchoCancellation = "on" | "off";
 
 export type EngineMessage =
-  | { type: "hello"; protocol: 3 }
+  | { type: "hello"; protocol: 4 }
   | {
       type: "status";
       state: Exclude<VoiceStatus, "off">;
       /** Participant the state is about: the addressee while thinking, the voice while speaking. */
       speaker?: string;
+    }
+  | {
+      type: "idle";
+      /** Nothing is running, speaking, queued or heard; sent on every change. */
+      idle: boolean;
     }
   | {
       type: "prompt";
@@ -80,7 +85,7 @@ export type EngineMessage =
   | { type: "error"; code: string; message: string; fatal: boolean };
 
 export type HostMessage =
-  | { type: "init"; protocol: 3; settings: LocalSettings }
+  | { type: "init"; protocol: 4; settings: LocalSettings }
   | { type: "reply_delta"; turn: number; speaker: string; reply: string; text: string }
   | { type: "reply_end"; turn: number; speaker: string; reply: string; text: string }
   | { type: "announcement"; speaker: string; reply: string; text: string }

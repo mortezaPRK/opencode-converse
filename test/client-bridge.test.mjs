@@ -34,6 +34,7 @@ function setup({
     : [];
   const calls = [];
   const turns = [];
+  const idles = [];
   const frames = [];
   const errors = [];
   const snapshots = [];
@@ -96,7 +97,7 @@ function setup({
       return {
         hello: async (...args) => {
           calls.push(["hello", ...args]);
-          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 3 });
+          return typeof hello === "function" ? hello(...args) : (hello ?? { protocol: 4 });
         },
         start: async (...args) => {
           calls.push(["start", ...args]);
@@ -114,6 +115,9 @@ function setup({
         },
         turn: async (input) => {
           turns.push(input);
+        },
+        idle: async (input) => {
+          idles.push(input);
         },
       };
     },
@@ -184,6 +188,7 @@ function setup({
     client,
     calls,
     turns,
+    idles,
     emit,
     frames,
     errors,
@@ -318,7 +323,7 @@ test("reload rpc.unavailable retries only safe readiness and hello calls before 
     hello: async () => {
       if (++hellos < 3)
         throw { _tag: "RpcError", type: "rpc.unavailable", message: "Plugin is reloading" };
-      return { protocol: 3 };
+      return { protocol: 4 };
     },
   });
   await s.bridge.start();
@@ -2329,4 +2334,49 @@ test("attach and detach go through the first agent's own session unless one is n
     ],
   );
   await s.bridge.stop();
+});
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 300));
+
+test("the engine's idle state is relayed to the server for the supervisor session", async () => {
+  const s = setup();
+  await s.bridge.start();
+  s.engine({ type: "idle", idle: true });
+  await tick();
+  assert.deepEqual(s.idles, [{ supervisorID: "session", idle: true }]);
+  s.engine({ type: "idle", idle: true });
+  await tick();
+  assert.equal(
+    s.idles.length,
+    2,
+    "a repeated idle report is relayed so the server can deliver again",
+  );
+  s.engine({ type: "idle", idle: false });
+  await tick();
+  assert.deepEqual(s.idles.at(-1), { supervisorID: "session", idle: false });
+  await s.bridge.stop();
+});
+
+test("a lane is not idle while its own execution runs, even if the engine is", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await begin(s);
+  s.engine({ type: "idle", idle: true });
+  await tick();
+  assert.deepEqual(s.idles, [], "the turn and its execution are still in flight");
+  s.emit("session.text.ended", { assistantMessageID: "assistant-1", ordinal: 0, text: "Hi" });
+  s.emit("session.execution.succeeded", {});
+  await settled();
+  assert.deepEqual(s.idles.at(-1), { supervisorID: "session", idle: true });
+  await s.bridge.stop();
+});
+
+test("no idle report is relayed after stop", async () => {
+  const s = setup();
+  await s.bridge.start();
+  await s.bridge.stop();
+  const before = s.idles.length;
+  s.engine({ type: "idle", idle: true });
+  await settled();
+  assert.equal(s.idles.length, before);
 });

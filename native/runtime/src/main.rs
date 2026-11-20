@@ -911,7 +911,7 @@ mod tests {
             }
             assert_eq!(f.backend.fixture.played, ["The rest is on screen."]);
             assert!(matches!(
-                f.out.last(),
+                f.out.iter().rfind(|e| !matches!(e, Engine::Idle { .. })),
                 Some(Engine::Status {
                     state: Status::Listening,
                     ..

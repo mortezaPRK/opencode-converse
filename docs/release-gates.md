@@ -92,6 +92,14 @@ architectures are not implied by operating-system support.
   too; that a worker announcement never starts a chain; and that `agentChat: "off"`
   makes no hand-offs. Check the 90-second cap with a slow model. Record the token
   cost of a typical four-turn chain before shipping `"on"` as the default.
+- **Idle delivery gate.** Start a long task in a followed session, then talk to the
+  agent (including a multi-step tool-using answer). Confirm a worker completion that
+  lands mid-answer does not change, cut or restart the agent's speech, and that the
+  agent reports it only after it finished speaking and you are quiet. Finish several
+  followed sessions while the agent speaks: one combined report afterwards. Speak
+  right as an update arrives: your turn is answered first and the update follows
+  after. While muted or paused no update is spoken; it is reported after unmuting or
+  resuming. Check with two agents and that nothing is delivered after stopping.
 - **Prompter lock gate.** With two agents: Ada follows a session; Grace trying
   `send_message`, `interrupt_session` or `attach_session` on it is refused with Ada's
   name; saying "Grace, take over that session" moves it (Grace can prompt, Ada can no

@@ -86,6 +86,7 @@ pub struct Controller {
     limits: Limits,
     /// The last complete reply of the current turn: who said it and what, for hand-offs.
     last_final: Option<(usize, String)>,
+    idle_sent: bool,
 }
 
 impl Default for Controller {
@@ -120,6 +121,7 @@ impl Default for Controller {
             chain: None,
             limits: Limits::default(),
             last_final: None,
+            idle_sent: false,
         }
     }
 }
@@ -304,12 +306,68 @@ impl Controller {
             break;
         }
     }
+    /// True when nothing is going on that a worker update could disturb: no turn in flight,
+    /// nothing speaking, queued or acknowledged, no user speech, and output neither muted nor
+    /// paused. Muted and paused count as busy because announcements are dropped or held then,
+    /// and an update must wait for the user instead of being consumed silently.
+    pub fn is_idle(&self) -> bool {
+        self.ready
+            && !self.muted
+            && !self.paused
+            && !self.active
+            && self.hearing.is_none()
+            && !self.playing
+            && !self.announcing
+            && self.announcements.is_empty()
+            && self.queue.is_empty()
+            && self.reply.is_none()
+            && self.ack_armed.is_none()
+    }
+    fn sync_idle(&mut self, out: &mut Vec<Engine>) {
+        let idle = self.is_idle();
+        if idle != self.idle_sent {
+            self.idle_sent = idle;
+            out.push(Engine::Idle { idle });
+        }
+    }
     pub fn ready(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+        self.ready_inner(out, actions);
+        self.sync_idle(out);
+    }
+    pub fn hearing(&mut self, id: u64, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+        self.hearing_inner(id, out, actions);
+        self.sync_idle(out);
+    }
+    pub fn transcript(
+        &mut self,
+        id: u64,
+        text: String,
+        out: &mut Vec<Engine>,
+        actions: &mut Vec<Action>,
+    ) {
+        self.transcript_inner(id, text, out, actions);
+        self.sync_idle(out);
+    }
+    pub fn drained(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+        self.drained_inner(out, actions);
+        self.sync_idle(out);
+    }
+    pub fn host(
+        &mut self,
+        message: Host,
+        out: &mut Vec<Engine>,
+        actions: &mut Vec<Action>,
+    ) -> Result<(), &'static str> {
+        let result = self.host_inner(message, out, actions);
+        self.sync_idle(out);
+        result
+    }
+    fn ready_inner(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         self.ready = true;
         self.rest(out);
         self.schedule_announcement(out, actions);
     }
-    pub fn hearing(&mut self, id: u64, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+    fn hearing_inner(&mut self, id: u64, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         if self.muted || !self.ready {
             return;
         }
@@ -330,7 +388,7 @@ impl Controller {
         self.hearing = Some(id);
         self.status(Status::Hearing, out);
     }
-    pub fn transcript(
+    fn transcript_inner(
         &mut self,
         id: u64,
         text: String,
@@ -374,7 +432,7 @@ impl Controller {
         });
         self.status(Status::Thinking, out);
     }
-    pub fn drained(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
+    fn drained_inner(&mut self, out: &mut Vec<Engine>, actions: &mut Vec<Action>) {
         self.playing = false;
         self.announcing = false;
         // The next queued speaker takes the floor without a listening flicker in between.
@@ -385,7 +443,7 @@ impl Controller {
         }
         self.schedule_announcement(out, actions);
     }
-    pub fn host(
+    fn host_inner(
         &mut self,
         message: Host,
         out: &mut Vec<Engine>,
@@ -1066,7 +1124,8 @@ mod tests {
         out.clear();
         c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
         assert_eq!(a, [Action::Pause(true)]);
-        assert!(out.is_empty());
+        assert!(matches!(&out[..], [Engine::Idle { idle: false }]));
+        out.clear();
         a.clear();
         c.host(
             Host::Announcement {
@@ -1713,5 +1772,110 @@ mod tests {
         .unwrap();
         assert!(c.chain.is_none() && !c.active);
         assert!(chain_end(&out).is_none());
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+    fn idles(out: &[Engine]) -> Vec<bool> {
+        out.iter()
+            .filter_map(|e| match e {
+                Engine::Idle { idle } => Some(*idle),
+                _ => None,
+            })
+            .collect()
+    }
+    fn announce(c: &mut Controller, out: &mut Vec<Engine>, a: &mut Vec<Action>) {
+        c.host(
+            Host::Announcement {
+                speaker: "a1".into(),
+                reply: "r".into(),
+                text: "A worker update.".into(),
+            },
+            out,
+            a,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn idle_is_announced_once_when_ready_and_only_on_changes() {
+        let mut c = Controller::default();
+        let (mut out, mut a) = (vec![], vec![]);
+        assert!(!c.is_idle());
+        c.ready(&mut out, &mut a);
+        assert_eq!(idles(&out), [true]);
+        out.clear();
+        c.hearing(1, &mut out, &mut a);
+        assert_eq!(idles(&out), [false]);
+        out.clear();
+        c.transcript(1, "check the build".into(), &mut out, &mut a);
+        assert!(idles(&out).is_empty(), "a committed turn stays busy");
+        c.host(
+            Host::ReplyEnd {
+                turn: 1,
+                speaker: "a1".into(),
+                reply: "r".into(),
+                text: "Sure.".into(),
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        c.host(
+            Host::TurnEnd {
+                turn: 1,
+                reason: Reason::Completed,
+            },
+            &mut out,
+            &mut a,
+        )
+        .unwrap();
+        assert!(idles(&out).is_empty(), "still playing: not idle");
+        assert!(!c.is_idle());
+        c.drained(&mut out, &mut a);
+        assert_eq!(idles(&out), [true]);
+        assert!(c.is_idle());
+    }
+    #[test]
+    fn a_playing_announcement_is_busy_until_it_drains() {
+        let mut c = Controller::default();
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        out.clear();
+        announce(&mut c, &mut out, &mut a);
+        assert_eq!(idles(&out), [false]);
+        out.clear();
+        c.drained(&mut out, &mut a);
+        assert_eq!(idles(&out), [true]);
+    }
+    #[test]
+    fn user_speech_makes_the_conversation_busy_and_an_abandoned_one_idle_again() {
+        let mut c = Controller::default();
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        c.hearing(1, &mut out, &mut a);
+        assert!(!c.is_idle());
+        out.clear();
+        c.transcript(1, "   ".into(), &mut out, &mut a);
+        assert_eq!(idles(&out), [true]);
+    }
+    #[test]
+    fn pause_and_mute_count_as_busy_so_updates_wait() {
+        let mut c = Controller::default();
+        let (mut out, mut a) = (vec![], vec![]);
+        c.ready(&mut out, &mut a);
+        out.clear();
+        c.host(Host::Pause { on: true }, &mut out, &mut a).unwrap();
+        assert_eq!(idles(&out), [false]);
+        out.clear();
+        c.host(Host::Pause { on: false }, &mut out, &mut a).unwrap();
+        assert_eq!(idles(&out), [true]);
+        out.clear();
+        c.host(Host::Mute { on: true }, &mut out, &mut a).unwrap();
+        assert_eq!(idles(&out), [false]);
+        out.clear();
+        c.host(Host::Mute { on: false }, &mut out, &mut a).unwrap();
+        assert_eq!(idles(&out), [true]);
     }
 }

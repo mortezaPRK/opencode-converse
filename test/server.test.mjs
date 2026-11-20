@@ -13,6 +13,17 @@ import {
   watchWorkers,
 } from "../dist/supervisor.js";
 
+/** Existing tests assume updates are delivered at once: report every session idle before each event. */
+function eagerIdle(service, sessions) {
+  const onEvent = service.onEvent.bind(service);
+  service.eager = true;
+  service.onEvent = (event, signal) => {
+    if (service.eager) for (const id of sessions.keys()) service.idle.add(id);
+    return onEvent(event, signal);
+  };
+  return service;
+}
+
 function fixture(directory = "/project") {
   const sessions = new Map();
   const storage = new Map();
@@ -93,11 +104,14 @@ function fixture(directory = "/project") {
     worktree: { list: async () => [{ directory: "/saved-worktree" }] },
   };
   const model = { providerID: "test", id: "model" };
-  const service = new Supervisor(ctx, {
-    supervisorModel: model,
-    workerModel: model,
-    runtime: {},
-  });
+  const service = eagerIdle(
+    new Supervisor(ctx, {
+      supervisorModel: model,
+      workerModel: model,
+      runtime: {},
+    }),
+    sessions,
+  );
   return {
     ctx,
     service,
@@ -828,7 +842,11 @@ test("watcher abort returns for uncooperative live and retry context or syntheti
       await watcher;
       await nextTick();
       assert.equal(stoppedBeforeSettlement, true);
-      assert.equal(pendingBeforeSettlement, 1, "unsettled SDK request still retains its identity");
+      assert.equal(
+        pendingBeforeSettlement,
+        phase === "context" ? 1 : 0,
+        "an unsettled context read retains its identity; a held update is already fenced by dedupe",
+      );
       assert.equal(fencesBeforeSettlement, phase === "synthetic" ? 1 : 0);
       assert.equal(attemptsBeforeSettlement, phase === "synthetic" ? 1 : 0);
       assert.equal(syntheticCalls, phase === "synthetic" ? 1 : 0);
@@ -909,7 +927,7 @@ test("late background rejection after caller cancellation remains observed and r
   await entered.promise;
   controller.abort();
   await update;
-  assert.equal(f.service.pending.size, 1);
+  assert.equal(f.service.pending.size, 0);
   assert.equal(f.service.deliveries.size, 1);
   admission.reject(new Error("late background response failure"));
   await f.service.deliveries.get(supervisorID)?.done;
@@ -1915,8 +1933,15 @@ test("RPC has the fixed typed shape and validates unknown fields", async () => {
     "stop",
     "attach",
     "turn",
+    "idle",
     "detach",
   ]);
+  const idle = Converse.methods.idle.input["~standard"];
+  assert.deepEqual(await idle.validate({ supervisorID: "s", idle: true }), {
+    value: { supervisorID: "s", idle: true },
+  });
+  assert.ok((await idle.validate({ supervisorID: "s", idle: "yes" })).issues);
+  assert.ok((await idle.validate({ supervisorID: "s", idle: true, extra: 1 })).issues);
   const turn = Converse.methods.turn.input["~standard"];
   assert.deepEqual(await turn.validate({ supervisorID: "s", origin: "user" }), {
     value: { supervisorID: "s", origin: "user" },
@@ -1924,10 +1949,10 @@ test("RPC has the fixed typed shape and validates unknown fields", async () => {
   assert.ok((await turn.validate({ supervisorID: "s", origin: "root" })).issues);
   assert.ok((await turn.validate({ supervisorID: "s", origin: "user", extra: 1 })).issues);
   const hello = Converse.methods.hello.output["~standard"];
-  assert.deepEqual(await hello.validate({ protocol: 3, packageRoot: "/pkg" }), {
-    value: { protocol: 3, packageRoot: "/pkg" },
+  assert.deepEqual(await hello.validate({ protocol: 4, packageRoot: "/pkg" }), {
+    value: { protocol: 4, packageRoot: "/pkg" },
   });
-  assert.ok((await hello.validate({ protocol: 3, extra: true })).issues);
+  assert.ok((await hello.validate({ protocol: 4, extra: true })).issues);
   const input = Converse.methods.start.input["~standard"];
   assert.deepEqual(await input.validate(undefined), { value: undefined });
   assert.ok((await input.validate({ model: { providerID: "p", id: "m" } })).issues);
@@ -2599,7 +2624,8 @@ test("one supervisor's pending admission does not delay another supervisor's sto
 
 test("in-flight identities are bounded without evicting active duplicates or losing retry authority", async () => {
   const f = fixture();
-  const { workerID } = await worker(f);
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
   const entered = deferred();
   const context = deferred();
   let reads = 0;
@@ -2626,10 +2652,11 @@ test("in-flight identities are bounded without evicting active duplicates or los
       await f.service.onEvent(event(`pending-${i}`));
     }
   }
-  assert.equal(f.notices.length, 256);
+  assert.equal(f.notices.length, 0, "updates are held while the conversation is busy");
   await f.service.onEvent(event("overflow"));
   await f.service.onEvent(event("overflow"));
-  assert.equal(f.notices.length, 257);
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 1, "one combined update for the one followed session");
 });
 
 test("dedupe storage is bounded", () => {
@@ -2958,7 +2985,7 @@ test("plugin registers the agent/tools/context/RPC and cleans up streams and reg
     await assert.rejects(tool.execute({}, { sessionID: "forged-supervisor" }), /owning Converse/);
   }
   const hello = await rpc.hello();
-  assert.equal(hello.protocol, 3);
+  assert.equal(hello.protocol, 4);
   assert.ok(hello.packageRoot);
   const { sessionID, runtime } = await rpc.start();
   assert.deepEqual(runtime, {});
@@ -3271,11 +3298,14 @@ test("on-screen attach announces the session to the supervisor and follows its u
 function crewFixture(agents) {
   const f = fixture();
   const model = f.model;
-  const service = new Supervisor(f.ctx, {
-    supervisorModel: model,
-    workerModel: model,
-    runtime: { agents },
-  });
+  const service = eagerIdle(
+    new Supervisor(f.ctx, {
+      supervisorModel: model,
+      workerModel: model,
+      runtime: { agents },
+    }),
+    f.sessions,
+  );
   return { ...f, service };
 }
 
@@ -3504,4 +3534,135 @@ test("agent prompts explain hand-offs, the prompter lock, and chat off", async (
   const quiet = await off.service.systemPrompt(b);
   assert.doesNotMatch(quiet, /begin your spoken reply with their name/);
   assert.match(quiet, /Do not address other agents/);
+});
+
+const succeeded = (id, sessionID) => ({
+  type: "session.execution.succeeded",
+  id,
+  location: { directory: "/project" },
+  data: { sessionID },
+});
+
+test("worker updates are held while the conversation is busy and delivered once when it goes idle", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  await f.service.onEvent(succeeded("held-1", workerID));
+  await f.service.onEvent(succeeded("held-1", workerID));
+  assert.equal(f.notices.length, 0, "never handed to the model while busy");
+  await f.service.setIdle(supervisorID, false);
+  assert.equal(f.notices.length, 0);
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 1);
+  assert.equal(f.notices[0].sessionID, supervisorID);
+  assert.equal(f.notices[0].delivery, "queue");
+  assert.equal(f.notices[0].resume, true);
+  assert.deepEqual(f.notices[0].metadata, { [WORKER_UPDATE_MARKER]: true });
+  await f.service.onEvent(succeeded("after-delivery", workerID));
+  assert.equal(
+    f.notices.length,
+    1,
+    "the delivery made the conversation busy until the client reports idle again",
+  );
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 2);
+});
+
+test("an update arriving while idle is delivered at once", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  await f.service.setIdle(supervisorID, true);
+  await f.service.onEvent(succeeded("now", workerID));
+  assert.equal(f.notices.length, 1);
+});
+
+test("held updates coalesce per followed session, latest state wins, forms stay individual", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  const other = await f.ctx.session.create({ title: "Second", agent: "build" });
+  await f.service.attachForUser(supervisorID, other.id);
+  f.notices.length = 0;
+  await f.service.onEvent(succeeded("a", workerID));
+  await f.service.onEvent({ ...succeeded("b", workerID), type: "session.execution.failed" });
+  await f.service.onEvent(succeeded("c", other.id));
+  for (const id of ["q1", "q2"])
+    await f.service.onEvent({
+      type: "form.created",
+      id,
+      data: { form: formInfo(workerID, id) },
+    });
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 1, "one combined synthetic for everything held");
+  const json = JSON.parse(f.notices[0].text.slice(f.notices[0].text.indexOf("{")));
+  assert.equal(json.updates.length, 4);
+  const states = json.updates.filter((u) => u.state !== "question asked");
+  assert.deepEqual(
+    states.map((u) => [u.sessionID, u.state]),
+    [
+      [workerID, "failed"],
+      [other.id, "succeeded"],
+    ],
+  );
+  assert.equal(json.updates.filter((u) => u.state === "question asked").length, 2);
+  assert.equal(json.moreUpdates, undefined);
+});
+
+test("overflow folds the oldest updates into a count instead of dropping them silently", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  for (let i = 0; i < 40; i++)
+    await f.service.onEvent({
+      type: "form.created",
+      id: `f${i}`,
+      data: { form: formInfo(workerID, `form-${i}`) },
+    });
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 1);
+  const text = f.notices[0].text;
+  const json = JSON.parse(text.slice(text.indexOf("{")));
+  assert.ok(json.updates.length <= 24);
+  assert.ok(json.moreUpdates >= 16);
+  assert.ok(Buffer.byteLength(text) < 14_000);
+});
+
+test("the user's turn goes first: updates wait for the next idle and are never lost", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  await f.service.setIdle(supervisorID, true);
+  await f.service.setIdle(supervisorID, false);
+  await f.service.onEvent(succeeded("during-user-turn", workerID));
+  assert.equal(f.notices.length, 0);
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 1);
+});
+
+test("updates arriving or idle reports after stop are never delivered", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  await f.service.onEvent(succeeded("before-stop", workerID));
+  await f.service.stop(supervisorID);
+  await assert.rejects(f.service.setIdle(supervisorID, true), /owning Converse supervisor/);
+  await f.service.onEvent(succeeded("after-stop", workerID));
+  assert.equal(f.notices.length, 0);
+  assert.equal(f.service.held.size, 0);
+});
+
+test("detaching a session drops its held updates", async () => {
+  const f = fixture();
+  f.service.eager = false;
+  const { supervisorID, workerID } = await worker(f);
+  await f.service.onEvent(succeeded("held", workerID));
+  await f.service.detachForUser(supervisorID, workerID);
+  await f.service.setIdle(supervisorID, true);
+  assert.equal(f.notices.length, 0);
+});
+
+test("the idle report only reaches a live supervisor session of this owner", async () => {
+  const f = fixture();
+  await assert.rejects(f.service.setIdle("session-404", true));
 });

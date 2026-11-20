@@ -54,10 +54,10 @@ const DEFAULT_ROSTER = [{ id: "a1", name: "Converse", voice: "default" }];
 test("runtime sends only protocol init and local device preferences", async () => {
   const { proc, runtime, messages } = setup();
   proc.stdout.write('{"type":"hello","pro');
-  proc.stdout.write('tocol":3}\n');
+  proc.stdout.write('tocol":4}\n');
   await runtime.ready;
   assert.deepEqual(proc.frames, [
-    { type: "init", protocol: 3, settings: { inputDevice: "mic", participants: DEFAULT_ROSTER } },
+    { type: "init", protocol: 4, settings: { inputDevice: "mic", participants: DEFAULT_ROSTER } },
   ]);
   proc.frame({ type: "status", state: "listening" });
   assert.deepEqual(messages, [{ type: "status", state: "listening" }]);
@@ -74,12 +74,12 @@ test("runtime sends configured inference tuning over init", async () => {
   const { proc, runtime } = setup({
     runtime: { asrThreads: 2, ttsThreads: 3 },
   });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.deepEqual(proc.frames, [
     {
       type: "init",
-      protocol: 3,
+      protocol: 4,
       settings: {
         inputDevice: "mic",
         asrThreads: 2,
@@ -93,7 +93,7 @@ test("runtime sends configured inference tuning over init", async () => {
 
 test("runtime sends endpointing over init", async () => {
   const { proc, runtime } = setup({ runtime: { endpointing: "patient" } });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.endpointing, "patient");
   await runtime.stop();
@@ -101,7 +101,7 @@ test("runtime sends endpointing over init", async () => {
 
 test("runtime sends echoCancellation over init", async () => {
   const { proc, runtime } = setup({ runtime: { echoCancellation: "off" } });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.echoCancellation, "off");
   await runtime.stop();
@@ -109,7 +109,7 @@ test("runtime sends echoCancellation over init", async () => {
 
 test("runtime sends agentChat over init and parses relayed prompts and chain ends", async () => {
   const { proc, runtime, messages } = setup({ runtime: { agentChat: "off" } });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.agentChat, "off");
   const relayed = {
@@ -130,7 +130,7 @@ test("runtime sends agentChat over init and parses relayed prompts and chain end
     { type: "chain_end", turn: 4, reason: "turns", extra: 1 },
   ]) {
     const s = setup();
-    s.proc.frame({ type: "hello", protocol: 3 });
+    s.proc.frame({ type: "hello", protocol: 4 });
     await s.runtime.ready;
     s.proc.frame(bad);
     assert.equal(s.messages.length, 0);
@@ -140,7 +140,7 @@ test("runtime sends agentChat over init and parses relayed prompts and chain end
 
 test("runtime sends acknowledgement over init", async () => {
   const { proc, runtime } = setup({ runtime: { acknowledgement: "off" } });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.equal(proc.frames[0].settings.acknowledgement, "off");
   await runtime.stop();
@@ -155,7 +155,7 @@ test("runtimeSettings contains only inference tuning", () => {
 
 test("fragmented valid stdout frames are concatenated at most once per completed frame", async (t) => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 3 });
+  s.proc.frame({ type: "hello", protocol: 4 });
   await s.runtime.ready;
   const text = "x".repeat(MAX_FRAME_BYTES - 100);
   const frame = Buffer.from(
@@ -188,7 +188,7 @@ test("fragmented valid stdout frames are concatenated at most once per completed
 
 test("stdout chunk accumulation preserves split UTF-8 and coalesced frame suffixes", async () => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 3 });
+  s.proc.frame({ type: "hello", protocol: 4 });
   await s.runtime.ready;
   const first = Buffer.from(
     '{"type":"prompt","turn":1,"speaker":"a1","addressed":false,"text":"€😀"}\n',
@@ -210,7 +210,7 @@ test("stdout chunk accumulation preserves split UTF-8 and coalesced frame suffix
 test("stop waits for confirmed close after SIGKILL and rejects unconfirmed termination", async () => {
   for (const outcome of ["delayed", "false", "throw", "no-close"]) {
     const s = setup({ shutdownTimeoutMs: 5, killTimeoutMs: 50 });
-    s.proc.frame({ type: "hello", protocol: 3 });
+    s.proc.frame({ type: "hello", protocol: 4 });
     await s.runtime.ready;
     let signalled;
     const signal = new Promise((resolve) => {
@@ -245,7 +245,7 @@ test("stop waits for confirmed close after SIGKILL and rejects unconfirmed termi
 
 test("failed kill remains blocking until late close makes a later stop successful", async () => {
   const s = setup({ shutdownTimeoutMs: 2, killTimeoutMs: 2 });
-  s.proc.frame({ type: "hello", protocol: 3 });
+  s.proc.frame({ type: "hello", protocol: 4 });
   await s.runtime.ready;
   s.proc.kill = () => false;
   await assert.rejects(s.runtime.stop(), /termination is unconfirmed/);
@@ -257,12 +257,12 @@ test("failed kill remains blocking until late close makes a later stop successfu
 test("outbound strings are bounded before JSON serialization or buffer allocation", async (t) => {
   for (const field of ["text", "reply", "settings"]) {
     const s = setup();
-    s.proc.frame({ type: "hello", protocol: 3 });
+    s.proc.frame({ type: "hello", protocol: 4 });
     await s.runtime.ready;
     const huge = "x".repeat(MAX_FRAME_BYTES * 8);
     const message =
       field === "settings"
-        ? { type: "init", protocol: 3, settings: { inputDevice: huge } }
+        ? { type: "init", protocol: 4, settings: { inputDevice: huge } }
         : {
             type: "reply_end",
             speaker: "a1",
@@ -286,7 +286,7 @@ test("outbound strings are bounded before JSON serialization or buffer allocatio
 
 test("bounded control-heavy speech is substituted one-for-one before JSON escaping", async () => {
   const s = setup();
-  s.proc.frame({ type: "hello", protocol: 3 });
+  s.proc.frame({ type: "hello", protocol: 4 });
   await s.runtime.ready;
   s.runtime.send({
     type: "reply_end",
@@ -303,7 +303,7 @@ test("bounded control-heavy speech is substituted one-for-one before JSON escapi
 for (const [name, frame, pattern] of [
   ["version mismatch", '{"type":"hello","protocol":1}\n', /version mismatch/],
   ["malformed JSON", "nope\n", /Unexpected|JSON/],
-  ["unknown fields", '{"type":"hello","protocol":3,"token":"secret"}\n', /version mismatch/],
+  ["unknown fields", '{"type":"hello","protocol":4,"token":"secret"}\n', /version mismatch/],
   ["wrong first message", '{"type":"status","state":"listening"}\n', /hello first/],
   ["oversized partial frame", "x".repeat(MAX_FRAME_BYTES + 1), /exceeds limit/],
   ["oversized terminated frame", "x".repeat(MAX_FRAME_BYTES + 1) + "\n", /exceeds limit/],
@@ -365,7 +365,7 @@ test("local device settings use the native UTF-8 byte and Unicode-control contra
 
 test("runtime reports EOF after handshake without accepting more events", async () => {
   const { proc, runtime, errors } = setup();
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   proc.stdout.end();
   await new Promise((resolve) => setImmediate(resolve));
@@ -386,7 +386,7 @@ test("runtime handles process errors and handshake deadline", async () => {
 for (const name of ["stdout", "stderr", "stdin"])
   test(`runtime handles ${name} stream errors as fatal`, async () => {
     const { proc, runtime, errors } = setup();
-    proc.frame({ type: "hello", protocol: 3 });
+    proc.frame({ type: "hello", protocol: 4 });
     await runtime.ready;
     proc[name].emit("error", new Error(`${name} failed`));
     assert.equal(errors.length, 1);
@@ -399,7 +399,7 @@ for (const name of ["stdout", "stderr", "stdin"])
 test("outbound oversized frames and blocked write queues fail and clean up without throwing", async () => {
   for (const blocked of [false, true]) {
     const { proc, runtime, errors } = setup();
-    proc.frame({ type: "hello", protocol: 3 });
+    proc.frame({ type: "hello", protocol: 4 });
     await runtime.ready;
     if (blocked)
       Object.defineProperty(proc.stdin, "writableLength", { value: MAX_FRAME_BYTES * 2 });
@@ -422,16 +422,16 @@ test("outbound oversized frames and blocked write queues fail and clean up witho
 
 test("graceful exit avoids kill; duplicate hello and invalid UTF-8 fail", async () => {
   const graceful = setup();
-  graceful.proc.frame({ type: "hello", protocol: 3 });
+  graceful.proc.frame({ type: "hello", protocol: 4 });
   await graceful.runtime.ready;
   const stopped = graceful.runtime.stop();
   graceful.proc.emit("close", 0, null);
   await stopped;
   assert.deepEqual(graceful.proc.kills, []);
   const duplicate = setup();
-  duplicate.proc.frame({ type: "hello", protocol: 3 });
+  duplicate.proc.frame({ type: "hello", protocol: 4 });
   await duplicate.runtime.ready;
-  duplicate.proc.frame({ type: "hello", protocol: 3 });
+  duplicate.proc.frame({ type: "hello", protocol: 4 });
   assert.match(duplicate.errors[0].message, /Duplicate/);
   await duplicate.runtime.stop();
   const invalid = setup();
@@ -523,7 +523,7 @@ test("runtime sends the configured roster, assigning unused voices in order", as
   const { proc, runtime } = setup({
     runtime: { agents: [{ name: "Ada", voice: "easton" }, { name: "Grace" }, { name: "Linus" }] },
   });
-  proc.frame({ type: "hello", protocol: 3 });
+  proc.frame({ type: "hello", protocol: 4 });
   await runtime.ready;
   assert.deepEqual(proc.frames[0].settings.participants, [
     { id: "a1", name: "Ada", voice: "easton" },

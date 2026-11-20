@@ -67,6 +67,12 @@ ALSA (`libasound2`). Windows needs the Microsoft Visual C++ x64 Redistributable.
   (the supervisor can read pending ones on request), and approvals happen in
   OpenCode's normal interface. Questions from followed sessions are announced; you
   answer them on screen.
+- Worker updates never interrupt the assistant. While you are speaking, a turn is
+  running, or anything is being spoken, queued or muted/paused, updates from followed
+  sessions wait; when the conversation is idle they reach the agent together in one
+  message (latest state per session, questions kept, a short "N more" note beyond
+  the bound), and the agent reports them. If you speak first, your turn goes first
+  and the updates wait for the next quiet moment.
 - The microphone starts only on an explicit command. Stopping a conversation
   releases its local runtime. Echo cancellation (`echoCancellation`, on by default)
   lets you talk over the assistant on speakers, but it is verified only offline

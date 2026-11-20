@@ -1,7 +1,7 @@
 //! Mirror of the fixed src/protocol.ts contract. Never accept executable/model paths.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 262_144;
 pub const MAX_PARTICIPANTS: usize = 4;
@@ -173,7 +173,7 @@ impl Host {
         match self {
             Self::Init { protocol, settings } => {
                 if *protocol != VERSION {
-                    return Err("Unsupported protocol version; expected 3");
+                    return Err("Unsupported protocol version; expected 4");
                 }
                 for device in [&settings.input_device, &settings.output_device]
                     .into_iter()
@@ -280,6 +280,11 @@ pub enum Engine {
         #[serde(skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
     },
+    /// The conversation became idle (`true`) or busy (`false`). Sent on every change, never
+    /// repeated. Idle means nothing is running, speaking, queued or heard.
+    Idle {
+        idle: bool,
+    },
     /// `speaker` is the participant the transcript was addressed to (the first agent when the
     /// user named nobody); `text` has the spoken name removed.
     Prompt {
@@ -357,7 +362,7 @@ mod tests {
     #[test]
     fn configured_inference_limits_are_bounded() {
         let valid: Host = serde_json::from_str(
-            r#"{"type":"init","protocol":3,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
+            r#"{"type":"init","protocol":4,"settings":{"asrThreads":2,"ttsThreads":3,"endpointing":"patient","acknowledgement":"off","echoCancellation":"off"}}"#,
         )
         .unwrap();
         assert!(valid.validate().is_ok());
@@ -374,22 +379,22 @@ mod tests {
         assert!(Settings::default().echo_cancellation_enabled());
         for bad in ["\"loud\"", "1", "true"] {
             let value =
-                format!(r#"{{"type":"init","protocol":3,"settings":{{"acknowledgement":{bad}}}}}"#);
+                format!(r#"{{"type":"init","protocol":4,"settings":{{"acknowledgement":{bad}}}}}"#);
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         for bad in ["\"auto\"", "1", "true"] {
             let value = format!(
-                r#"{{"type":"init","protocol":3,"settings":{{"echoCancellation":{bad}}}}}"#
+                r#"{{"type":"init","protocol":4,"settings":{{"echoCancellation":{bad}}}}}"#
             );
             assert!(serde_json::from_str::<Host>(&value).is_err(), "{value}");
         }
         assert!(serde_json::from_str::<Host>(
-            r#"{"type":"init","protocol":3,"settings":{"endpointing":"fast"}}"#
+            r#"{"type":"init","protocol":4,"settings":{"endpointing":"fast"}}"#
         )
         .is_err());
         for value in [
-            r#"{"type":"init","protocol":3,"settings":{"asrThreads":0}}"#,
-            r#"{"type":"init","protocol":3,"settings":{"ttsThreads":257}}"#,
+            r#"{"type":"init","protocol":4,"settings":{"asrThreads":0}}"#,
+            r#"{"type":"init","protocol":4,"settings":{"ttsThreads":257}}"#,
         ] {
             let message: Host = serde_json::from_str(value).unwrap();
             assert!(message.validate().is_err(), "{value}");
@@ -425,7 +430,7 @@ mod tests {
     fn strict_contract() {
         for s in [
             r#"{"type":"shutdown","extra":1}"#,
-            r#"{"type":"init","protocol":3,"settings":{"voice":"x"}}"#,
+            r#"{"type":"init","protocol":4,"settings":{"voice":"x"}}"#,
             r#"{"type":"unknown"}"#,
             r#"{"type":"mute","on":1}"#,
             r#"{"type":"pause","on":1}"#,
@@ -441,7 +446,7 @@ mod tests {
     fn participants_are_validated_and_speakers_are_required() {
         let init = |participants: &str| -> Result<(), &'static str> {
             let message: Host = serde_json::from_str(&format!(
-                r#"{{"type":"init","protocol":3,"settings":{{"participants":{participants}}}}}"#
+                r#"{{"type":"init","protocol":4,"settings":{{"participants":{participants}}}}}"#
             ))
             .map_err(|_| "parse")?;
             message.validate()
@@ -501,7 +506,7 @@ mod tests {
     fn agent_chat_is_on_unless_turned_off_and_rejects_other_values() {
         let parse = |settings: &str| {
             serde_json::from_str::<Host>(&format!(
-                r#"{{"type":"init","protocol":3,"settings":{settings}}}"#
+                r#"{{"type":"init","protocol":4,"settings":{settings}}}"#
             ))
         };
         let on = |settings: &str| match parse(settings).unwrap() {
