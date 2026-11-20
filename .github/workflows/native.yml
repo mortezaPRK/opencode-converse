@@ -41,14 +41,14 @@ jobs:
             exe: opencode-converse.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: 26
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: native
           key: ${{ matrix.target }}
@@ -69,7 +69,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Windows MSVC environment
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        uses: ilammy/msvc-dev-cmd@v1.13.0
       - name: Windows libclang
         if: runner.os == 'Windows'
         shell: bash
@@ -113,7 +113,7 @@ jobs:
             macOS) otool -L dist/${{ matrix.exe }} ;;
             Windows) "$(vswhere -latest -find 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe' | head -1)" //dependents dist/${{ matrix.exe }} || true ;;
           esac
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: engine-${{ matrix.target }}
           path: dist/${{ matrix.exe }}
