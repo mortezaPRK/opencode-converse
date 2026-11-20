@@ -1,6 +1,6 @@
 {
   "name": "@mortz.prk/opencode-converse",
-  "version": "0.1.0",
+  "version": "0.1.1-pr.53.8",
   "description": "A local, Rust-powered live voice supervisor for OpenCode.",
   "license": "MIT",
   "repository": {
