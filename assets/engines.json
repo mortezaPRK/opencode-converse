@@ -1,20 +1,20 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1-pr.57.9",
   "engines": {
     "darwin-arm64": {
-      "file": "opencode-converse-0.1.0-darwin-arm64",
-      "bytes": 43596960,
-      "sha256": "c0e169fc74803595f6d0cfd15c8c94fbb25af567289f9a9d7714743ca488de47"
+      "file": "opencode-converse-0.1.1-pr.57.9-darwin-arm64",
+      "bytes": 43640928,
+      "sha256": "b18598e40570482bc78a0bcc57421d0fe1fb5805efa12420c5bb8ef9901bfb28"
     },
     "linux-x64": {
-      "file": "opencode-converse-0.1.0-linux-x64",
-      "bytes": 51099016,
-      "sha256": "938c697a50de4b25bdf1f483589b84d7a79db66a6ba7f3c12f8e2626eaec9a16"
+      "file": "opencode-converse-0.1.1-pr.57.9-linux-x64",
+      "bytes": 51152720,
+      "sha256": "6fc2846e1c09641af24825e847a399a0d9bad567a135adf4581f93af5c58f392"
     },
     "win32-x64": {
-      "file": "opencode-converse-0.1.0-win32-x64.exe",
-      "bytes": 38001152,
-      "sha256": "6b3674ce858398e733ce7c84a12dee2006c19de3b1bd095e47a3cb33ae734224"
+      "file": "opencode-converse-0.1.1-pr.57.9-win32-x64.exe",
+      "bytes": 38064640,
+      "sha256": "253cab142e3619482e5b3b7a336dab5b7fe3999c30a5b90e793b14f43d273b67"
     }
   }
 }

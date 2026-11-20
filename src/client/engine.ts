@@ -19,7 +19,7 @@ import { dirname, join, posix, win32 } from "node:path";
 import { isAbsolutePath } from "../config.js";
 
 /** Engine installation layout version. Must match package.json. */
-export const RUNTIME_VERSION = "0.1.0";
+export const RUNTIME_VERSION = "0.1.1-pr.57.9";
 /** Fixed release location. Never taken from options or the environment. */
 const RELEASE_BASE = "https://github.com/mortezaPRK/opencode-converse/releases/download";
 export const PACKAGE_NAME = "@mortz.prk/opencode-converse";
