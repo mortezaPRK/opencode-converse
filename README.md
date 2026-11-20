@@ -51,16 +51,19 @@ npm run build
 npm run engine:build
 ```
 
-The engine is built under `native/target/release/` (`.exe` on Windows). Stage it
-into the npm package before packing:
+The engine is built under `native/target/release/` (`.exe` on Windows). Install
+your local build into the fixed app state folder (it then replaces the download
+for this version):
 
 ```sh
 npm run engine:build
 npm run engine:stage
 ```
 
-The plugin copies the staged engine and its shared libraries into the fixed app
-state folder on first use. There is no engine path option and no environment
+Normal installs download this version's engine on first use from the matching
+GitHub release into the fixed app state folder. The download is checked against
+the size and SHA-256 pinned in `assets/engines.json` and shows progress while the
+conversation starts. There is no engine path or URL option and no environment
 override. If models are missing, the runtime error prints the exact installed
 engine path to run. Model installation and diagnostics are explicit local
 operations:
@@ -173,7 +176,7 @@ selection or to an OpenCode-provided agent. Each accepts `"provider/model"`,
 
 The engine and speech-model locations are fixed under the app state folder.
 There is no engine, data, or model path option and no `CONVERSE_BIN` override.
-The plugin copies the packaged engine into `<state>/bin/<version>/` on first use,
+The plugin downloads this version's pinned engine into `<state>/bin/<version>/` on first use,
 and speech models stay in `<state>/models` so they are reused across engine
 versions. `asrThreads`, `ttsThreads`, `endpointing`, `acknowledgement`, `echoCancellation`, and `agentChat` are the only runtime tuning
 options, plus `agents` (see [`docs/configuration.md`](docs/configuration.md#agents)),

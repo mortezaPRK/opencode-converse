@@ -118,7 +118,7 @@ export function normalizeVoiceStatus(value: string | undefined): VoiceStatus {
  * state stays what it is. An error replaces the label and detail but not
  * `active`, so a running conversation keeps its controls.
  */
-export function presence(state: VoiceStatus, error?: string): Presence {
+export function presence(state: VoiceStatus, error?: string, progress?: string): Presence {
   if (error)
     return {
       state: "error",
@@ -130,7 +130,13 @@ export function presence(state: VoiceStatus, error?: string): Presence {
       interval: 0,
       active: state !== "off",
     };
-  return { state, ...STATES[state], active: state !== "off" };
+  const base = STATES[state];
+  return {
+    state,
+    ...base,
+    ...(state === "loading" && progress ? { detail: progress } : {}),
+    active: state !== "off",
+  };
 }
 
 /** The frame a terminal chip shows at `frame`, wrapping around the loop. */

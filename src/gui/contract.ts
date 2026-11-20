@@ -35,6 +35,7 @@ export const ConverseDesktop = Ipc.define({
       }),
     ),
     speaker: Schema.NullOr(Schema.String),
+    progress: Schema.optional(Schema.String),
   }),
   methods: {
     start: {

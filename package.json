@@ -12,7 +12,8 @@
     "docs/options.schema.json",
     "docs/release-gates.md",
     "assets/models.json",
-    "assets/bin"
+    "assets/engines.json",
+    "native/THIRD_PARTY.md"
   ],
   "type": "module",
   "exports": {

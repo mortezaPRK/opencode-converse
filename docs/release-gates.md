@@ -30,8 +30,8 @@ architectures are not implied by operating-system support.
 - Late generation results and interrupted reply chunks cannot restart speech.
 - Worker/project data cannot make the model approve a permission request.
 - Engine and speech-model paths are fixed under the app state folder. No plugin
-  option or environment variable can redirect them. The packaged engine is copied
-  once into the state folder, and models are reused across engine versions; device
+  option or environment variable can redirect them. This version's engine is downloaded
+  once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions; device
   preferences stay in host storage.
 - Pause silences spoken output without cancelling the turn, discarding queued
   speech, or stopping the runtime; resume continues the held speech. Verify on a
@@ -110,9 +110,11 @@ architectures are not implied by operating-system support.
 - Produce a third-party inventory, notices, and any required source materials.
 - Review npm and Cargo dependency advisories. Do not use forced dependency upgrades
   as a substitute for testing the supported SDK.
-- Package each target's staged engine under
-  `assets/bin/<platform>-<arch>/`. Verify the copied state-folder engine starts
-  without a compiler, Node runtime, or engine download on the user's machine.
+- Attach each target's engine to the version's GitHub release as
+  `opencode-converse-<version>-<platform>-<arch>[.exe]` and pin its size and
+  SHA-256 in `assets/engines.json` before packing. Verify a clean machine downloads,
+  verifies, and starts the engine without a compiler or Node build step, and that
+  `npm pack` ships no engine binary.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.
 - Public repository name/ownership, signing identities, and publication are
   separate explicit actions. No workflow in this repository publishes releases.
