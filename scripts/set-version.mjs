@@ -23,15 +23,30 @@ function setJson(root, path, version, edit) {
   write(root, path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-/** Workspace crates are the Cargo.lock packages that have no registry source. */
-function setCargoLock(text, version) {
-  let count = 0;
+/** Package names of the workspace members; patched path dependencies keep their own version. */
+function workspaceCrates(root) {
+  const manifest = read(root, "native/Cargo.toml");
+  const members = manifest.match(/^members = \[([^\]]*)\]/m);
+  if (!members) throw new Error("Cannot find workspace members in native/Cargo.toml");
+  return new Set(
+    [...members[1].matchAll(/"([^"]+)"/g)].map(([, member]) => {
+      const name = read(root, join("native", member, "Cargo.toml")).match(/^name = "([^"]+)"$/m);
+      if (!name) throw new Error(`Cannot find the package name of native/${member}`);
+      return name[1];
+    }),
+  );
+}
+
+function setCargoLock(text, crates, version) {
+  const found = new Set();
   const out = text.replace(/\[\[package\]\]\n([\s\S]*?)(?=\n\[\[package\]\]|\n*$)/g, (block) => {
-    if (/^source = /m.test(block)) return block;
-    count++;
+    const name = block.match(/^name = "([^"]+)"$/m)?.[1];
+    if (!name || !crates.has(name) || /^source = /m.test(block)) return block;
+    found.add(name);
     return block.replace(/^version = ".*"$/m, `version = "${version}"`);
   });
-  if (count === 0) throw new Error("Cannot find workspace crates in native/Cargo.lock");
+  const missing = [...crates].filter((name) => !found.has(name));
+  if (missing.length) throw new Error(`Cannot find ${missing.join(", ")} in native/Cargo.lock`);
   return out;
 }
 
@@ -58,7 +73,11 @@ export function setVersion(root, version) {
       "the workspace version in native/Cargo.toml",
     ),
   );
-  write(root, "native/Cargo.lock", setCargoLock(read(root, "native/Cargo.lock"), version));
+  write(
+    root,
+    "native/Cargo.lock",
+    setCargoLock(read(root, "native/Cargo.lock"), workspaceCrates(root), version),
+  );
   write(
     root,
     "src/client/engine.ts",
