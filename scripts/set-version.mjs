@@ -61,6 +61,8 @@ export function setVersion(root, version) {
     lock.packages[""].version = version;
   });
   setJson(root, "assets/engines.json", version, (manifest) => {
+    // Pinned engines belong to one version; a new version has none until its release writes them.
+    if (manifest.version !== version) manifest.engines = {};
     manifest.version = version;
   });
   write(
