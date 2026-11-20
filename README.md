@@ -31,9 +31,11 @@ required; see [configuration](docs/configuration.md)):
 ```
 
 On first start the plugin downloads this version's engine from its GitHub release
-and verifies it against the pinned size and SHA-256. Then install the speech
-models once, with the engine path shown in the error or listed under
-[Develop](#develop) (`<state>/bin/<version>/opencode-converse models install`).
+and verifies it against the pinned size and SHA-256, then downloads and verifies the
+pinned speech models (about 210 MB) the same way, with progress shown while the
+conversation is starting. Later starts use what is installed. If the automatic
+download fails (offline machine, blocked host), the error names the asset and the
+reason and prints the manual command; see [Develop](#develop).
 A prerelease built from a pull request can be installed as
 `@mortz.prk/opencode-converse@<version>`; see [CONTRIBUTING](CONTRIBUTING.md).
 
@@ -94,14 +96,20 @@ Normal installs download this version's engine on first use from the matching
 GitHub release into the fixed app state folder. The download is checked against
 the size and SHA-256 pinned in `assets/engines.json` and shows progress while the
 conversation starts. There is no engine path or URL option and no environment
-override. If models are missing, the runtime error prints the exact installed
-engine path to run. Model installation and diagnostics are explicit local
-operations:
+override. Speech models are installed automatically after the engine on first
+start. The same steps remain available as local commands for troubleshooting or
+offline preparation:
 
 ```sh
+<state>/bin/<version>/opencode-converse models status
 <state>/bin/<version>/opencode-converse models install
 <state>/bin/<version>/opencode-converse doctor
 ```
+
+`models status --json` and `models install --json` print bounded JSON lines (the
+plugin uses them for progress). Installation removes each downloaded archive from
+`<state>/downloads/` once its model is verified and installed, and clears stale
+files left there by older versions.
 
 Model URLs, sizes, and SHA-256 digests are recorded in
 [`assets/models.json`](assets/models.json). The same file defines the VAD, turn,

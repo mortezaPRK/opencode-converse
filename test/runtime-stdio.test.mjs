@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -286,7 +286,8 @@ async function runtime(t, args = ["run", "--test-fixture"], dir) {
   const isolated =
     args.includes("--test-fixture") ||
     args.includes("--test-fixture-loading") ||
-    (args[0] === "doctor" && !args.includes("--test-only-inference"));
+    (args[0] === "doctor" && !args.includes("--test-only-inference")) ||
+    args[0] === "models";
   const command = isolated ? [...args, "--test-state-dir", dir] : args;
   const child = spawn(executable, command, {
     cwd: root,
@@ -726,5 +727,24 @@ test(
     const result = await off.closed;
     assert.equal(result.frames.filter((f) => f.type === "prompt").length, 1);
     assert.ok(!result.frames.some((f) => f.type === "chain_end"));
+  },
+);
+
+test(
+  "models status --json is offline, one line, and writes nothing",
+  { timeout: 10_000 },
+  async (t) => {
+    const dir = await localDir(t);
+    const proc = await runtime(t, ["models", "status", "--json"], dir);
+    const result = await proc.closed;
+    assert.equal(result.code, 0);
+    assert.equal(result.frames.length, 1);
+    const [status] = result.frames;
+    assert.equal(status.type, "status");
+    assert.equal(status.installed, false);
+    assert.equal(status.assets.length, 5);
+    assert.ok(status.missing_bytes > 100_000_000);
+    assert.ok(status.assets.every((a) => a.installed === false && a.bytes > 0));
+    assert.deepEqual(await readdir(dir), []);
   },
 );

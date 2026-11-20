@@ -63,7 +63,7 @@ npm run engine:stage
 
 `npm run engine:stage` installs the self-contained release executable (ONNX
 Runtime is linked statically; Phonon is pure Rust) into `<state>/bin/<version>/`.
-Speech models are downloaded separately; see below.
+Speech models are installed automatically on first start; see below.
 
 ## Models
 
@@ -205,9 +205,25 @@ The four shipped voices are Apache-2.0 Phonon voice embeddings from
 installed under `<state>/models/tts-phonon-voices-en`. They are loaded by the same
 local-files-only synthesizer as the default voice.
 
-Install the pinned defaults with the engine installed in the state folder:
+Starting a conversation checks the installed models through the engine
+(`models status --json`, offline) and, when anything is missing, runs
+`models install --json` as a child process with a sanitized environment (no
+server credentials). Progress appears in the starting state ("Downloading speech
+models 120/210 MB"). Stopping the conversation kills the installer; a stall of
+two minutes without output or 45 minutes overall fails the start with the asset,
+the reason, and the manual command. Installers in several windows queue on the
+engine lock, and the later one finds everything installed.
+
+Each download is verified against its pinned size and SHA-256 and installed
+atomically; the downloaded file is then removed from `<state>/downloads/`, as are
+stale files that belong to no current pinned asset (regular files directly inside
+that folder only) and leftover staging folders from an interrupted install.
+
+To install or check by hand (troubleshooting, offline preparation) with the engine
+in the state folder:
 
 ```sh
+<state>/bin/<package-version>/opencode-converse models status
 <state>/bin/<package-version>/opencode-converse models install
 <state>/bin/<package-version>/opencode-converse doctor
 ```

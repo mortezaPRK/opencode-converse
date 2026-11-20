@@ -14,6 +14,7 @@ import { Converse, WORKER_UPDATE_MARKER } from "../rpc.js";
 import { resolveRoster, type Participant, type RuntimeConfig } from "../config.js";
 import type { EngineMessage, HostMessage, LocalSettings, VoiceStatus } from "../protocol.js";
 import { ensureEngine } from "./engine.js";
+import { ensureModels } from "./models.js";
 import { startRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { waitForConverse } from "./readiness.js";
 
@@ -66,7 +67,7 @@ export interface Snapshot {
   participants: Participant[];
   /** Name of the agent the current status is about (thinking about / speaking), if any. */
   speaker: string | null;
-  /** Engine download progress while starting, e.g. "Downloading voice engine 12/45 MB". */
+  /** Engine and speech-model download progress while starting, e.g. "Downloading speech models 120/210 MB". */
   progress?: string;
 }
 export interface BridgeOptions {
@@ -1069,15 +1070,18 @@ export function createBridge(options: BridgeOptions) {
         let executable: string | undefined;
         if (!options.runtime) {
           try {
+            const onProgress = (text: string) => {
+              if (closed || text === progress) return;
+              progress = text;
+              changed();
+            };
             executable = await ensureEngine({
               ...(options.packageRoot ? { packageRoot: options.packageRoot } : {}),
               signal: abort.signal,
-              onProgress: (text) => {
-                if (closed || text === progress) return;
-                progress = text;
-                changed();
-              },
+              onProgress,
             });
+            if (closed) return;
+            await ensureModels({ executable, signal: abort.signal, onProgress });
           } finally {
             progress = undefined;
           }

@@ -34,7 +34,7 @@ architectures are not implied by operating-system support.
 - Worker/project data cannot make the model approve a permission request.
 - Engine and speech-model paths are fixed under the app state folder. No plugin
   option or environment variable can redirect them. This version's engine is downloaded
-  once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions; device
+  once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions (and installed automatically after the engine on first start, with the download cache cleaned afterwards); device
   preferences stay in host storage.
 - Pause silences spoken output without cancelling the turn, discarding queued
   speech, or stopping the runtime; resume continues the held speech. Verify on a
@@ -116,8 +116,9 @@ architectures are not implied by operating-system support.
 - Attach each target's engine to the version's GitHub release as
   `opencode-converse-<version>-<platform>-<arch>[.exe]` and pin its size and
   SHA-256 in `assets/engines.json` before packing. Verify a clean machine downloads,
-  verifies, and starts the engine without a compiler or Node build step, and that
-  `npm pack` ships no engine binary.
+  verifies, and starts the engine without a compiler or Node build step, installs the speech
+  models automatically on the first conversation start, leaves `<state>/downloads/`
+  empty afterwards, and that `npm pack` ships no engine binary.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.
 - Signing identities (macOS signing/notarization, Windows code signing) are not set
   up; the published engines are unsigned. Publication runs through the manual

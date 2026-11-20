@@ -1,11 +1,12 @@
-//! Explicit, pinned model installation. Startup never calls this module.
+//! Pinned model installation and status. Startup never downloads.
 use crate::inventory::{self, Asset, Format, Inventory};
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_EXTRACTED: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 8192;
@@ -209,11 +210,13 @@ fn fetch(
     stage: &Path,
     name: &str,
     pin: &Asset,
+    report: &mut Reporter,
 ) -> Result<std::path::PathBuf> {
     let cached = cache.join(&pin.file);
     let download = stage.join(name);
     if fs::symlink_metadata(&cached).is_ok() {
         copy_cached(&cached, &download, pin)?;
+        report.progress(pin.bytes, true);
         return Ok(download);
     }
     // An unverified cache entry is not overwritten or trusted.
@@ -222,7 +225,7 @@ fn fetch(
         "Unverified model cache {}; remove it explicitly and retry",
         cached.display()
     );
-    eprintln!("Downloading {} ({} bytes)", pin.file, pin.bytes);
+    report.note(&format!("Downloading {} ({} bytes)", pin.file, pin.bytes));
     let response = client.get(&pin.url).send()?.error_for_status()?;
     if let Some(length) = response.content_length() {
         ensure!(
@@ -235,7 +238,18 @@ fn fetch(
         .write(true)
         .create_new(true)
         .open(&download)?;
-    let n = std::io::copy(&mut response.take(pin.bytes + 1), &mut out)?;
+    let mut input = response.take(pin.bytes + 1);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut n = 0u64;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        out.write_all(&buffer[..read])?;
+        n += read as u64;
+        report.progress(read as u64, false);
+    }
     out.flush()?;
     out.sync_all()?;
     ensure!(
@@ -268,16 +282,281 @@ fn member_pin(asset: &Asset, member: &inventory::AssetFile) -> Asset {
     }
 }
 
-pub fn install() -> Result<()> {
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+const WAIT_INTERVAL: Duration = Duration::from_secs(2);
+const LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
+const MAX_DOWNLOAD_ENTRIES: usize = 1024;
+const MAX_MESSAGE_CHARS: usize = 2000;
+
+/// Human lines go to stderr. In JSON mode every event is one bounded line on `out`.
+pub struct Reporter {
+    json: bool,
+    out: Box<dyn Write>,
+    asset: Option<String>,
+    total: u64,
+    done: u64,
+    last: Option<Instant>,
+}
+
+impl Reporter {
+    pub fn new(json: bool, out: Box<dyn Write>, total: u64) -> Self {
+        Self {
+            json,
+            out,
+            asset: None,
+            total,
+            done: 0,
+            last: None,
+        }
+    }
+    fn event(&mut self, value: serde_json::Value) {
+        if self.json {
+            let _ = writeln!(self.out, "{value}");
+            let _ = self.out.flush();
+        }
+    }
+    fn note(&self, text: &str) {
+        eprintln!("{text}");
+    }
+    fn start(&mut self, id: &str, bytes: u64) {
+        self.asset = Some(id.into());
+        self.event(serde_json::json!({"type":"start","asset":id,"bytes":bytes}));
+    }
+    fn progress(&mut self, bytes: u64, force: bool) {
+        self.done = (self.done + bytes).min(self.total);
+        let due = self.last.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL);
+        if force || due || self.done == self.total {
+            self.last = Some(Instant::now());
+            let asset = self.asset.clone();
+            self.event(serde_json::json!({"type":"progress","asset":asset,"done":self.done,"total":self.total}));
+        }
+    }
+    fn verified(&mut self, id: &str) {
+        self.event(serde_json::json!({"type":"verified","asset":id}));
+        eprintln!("Verified and installed {id}");
+    }
+    fn finish(&mut self) {
+        self.event(serde_json::json!({"type":"done"}));
+    }
+    fn fail(&mut self, error: &anyhow::Error) {
+        let message: String = format!("{error:#}")
+            .chars()
+            .take(MAX_MESSAGE_CHARS)
+            .collect();
+        let asset = self.asset.clone();
+        self.event(serde_json::json!({"type":"error","asset":asset,"message":message}));
+    }
+}
+
+/// Cache file names (under `downloads/`) that one asset's pinned artifacts use.
+fn cache_names(asset: &Asset) -> Vec<String> {
+    if asset.format == Format::Files {
+        asset
+            .files
+            .iter()
+            .map(|member| member_pin(asset, member).file)
+            .collect()
+    } else {
+        vec![asset.file.clone()]
+    }
+}
+
+fn asset_bytes(asset: &Asset) -> u64 {
+    if asset.format == Format::Files {
+        asset.files.iter().map(|member| member.bytes).sum()
+    } else {
+        asset.bytes
+    }
+}
+
+/// Installed members and their pins: (path under models/, pin).
+fn installed_members(models: &Path, asset: &Asset) -> Vec<(std::path::PathBuf, Asset)> {
+    let root = models.join(asset.runtime_path());
+    if asset.format == Format::Files {
+        asset
+            .files
+            .iter()
+            .map(|member| (root.join(&member.path), member_pin(asset, member)))
+            .collect()
+    } else {
+        vec![(
+            root,
+            Asset {
+                id: asset.id.clone(),
+                file: asset.file.clone(),
+                url: asset.url.clone(),
+                sha256: asset.sha256.clone(),
+                bytes: asset.bytes,
+                format: Format::File,
+                files: vec![],
+                install: None,
+                runtime: inventory::RuntimeAsset {
+                    path: asset.runtime.path.clone(),
+                    tokens: None,
+                    data_dir: None,
+                },
+            },
+        )]
+    }
+}
+
+/// Cheap, offline check: every pinned file exists with its pinned length.
+fn present(models: &Path, asset: &Asset) -> bool {
+    installed_members(models, asset).iter().all(|(path, pin)| {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == pin.bytes)
+    })
+}
+
+/// Full check used before skipping an install: every pinned file hashes correctly.
+fn intact(models: &Path, asset: &Asset) -> bool {
+    asset.format != Format::TarBz2
+        && installed_members(models, asset)
+            .iter()
+            .all(|(path, pin)| verified(path, pin))
+}
+
+/// `models status --json`: one line, no network, no hashing.
+pub fn status(json: bool) -> Result<()> {
+    let inventory = Inventory::load()?;
+    let models = crate::paths::models_dir()?;
+    let mut assets = vec![];
+    let mut missing = 0u64;
+    for asset in &inventory.assets {
+        let installed = present(&models, asset);
+        if !installed {
+            missing += asset_bytes(asset);
+        }
+        assets.push(
+            serde_json::json!({"id":asset.id,"installed":installed,"bytes":asset_bytes(asset)}),
+        );
+    }
+    let installed = missing == 0;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"type":"status","installed":installed,"missing_bytes":missing,"assets":assets})
+        );
+    } else if installed {
+        eprintln!("Speech models are installed.");
+    } else {
+        eprintln!("Speech models are missing ({missing} bytes to download). Run `opencode-converse models install`.");
+    }
+    Ok(())
+}
+
+/// Remove regular files in `downloads/` that are not in `keep`. Never follows or removes
+/// links, directories, or anything outside `cache`; scans a bounded number of entries.
+fn clean_downloads(cache: &Path, keep: &HashSet<String>) {
+    let Ok(entries) = fs::read_dir(cache) else {
+        return;
+    };
+    for entry in entries.take(MAX_DOWNLOAD_ENTRIES).flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if keep.contains(&name) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
+}
+
+/// Staging directories left behind by an installer that was killed. The engine lock is
+/// held, so no live installer owns one. Only real directories with our prefix are removed.
+fn remove_stale_stages(data: &Path) {
+    let Ok(entries) = fs::read_dir(data) else {
+        return;
+    };
+    for entry in entries.take(MAX_DOWNLOAD_ENTRIES).flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".model-stage-")
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn remove_cached(cache: &Path, asset: &Asset) {
+    for name in cache_names(asset) {
+        if fs::symlink_metadata(cache.join(&name)).is_ok_and(|meta| meta.is_file()) {
+            let _ = fs::remove_file(cache.join(name));
+        }
+    }
+}
+
+fn acquire_engine_lock(dir: &Path, report: &mut Reporter) -> Result<File> {
+    acquire_lock(dir, report, LOCK_WAIT, WAIT_INTERVAL)
+}
+
+fn acquire_lock(
+    dir: &Path,
+    report: &mut Reporter,
+    wait: Duration,
+    interval: Duration,
+) -> Result<File> {
+    let deadline = Instant::now() + wait;
+    let mut announced = false;
+    loop {
+        match crate::paths::lock_at(dir) {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if error.to_string().contains("audio engine lock") && Instant::now() < deadline =>
+            {
+                if !announced {
+                    announced = true;
+                    report.note("Waiting for another Converse process to finish...");
+                }
+                // Heartbeat so a supervising host can tell waiting from a hang.
+                report.event(serde_json::json!({"type":"waiting"}));
+                std::thread::sleep(interval);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub fn install(json: bool) -> Result<()> {
+    let mut report = Reporter::new(json, Box::new(std::io::stdout()), 0);
+    let result = install_all(&mut report);
+    match &result {
+        Ok(()) => report.finish(),
+        Err(error) => report.fail(error),
+    }
+    result
+}
+
+fn install_all(report: &mut Reporter) -> Result<()> {
     let inventory = Inventory::load()?;
     let data = crate::paths::state_dir()?;
     fs::create_dir_all(&data)?;
-    // Installation cannot replace files an active engine is loading.
-    let _engine_lock = crate::paths::lock()?;
+    // Installation cannot replace files an active engine is loading. Concurrent installers
+    // queue here; the later one finds everything installed and verified.
+    let _engine_lock = acquire_engine_lock(&data, report)?;
     let models = crate::paths::models_dir()?;
     fs::create_dir_all(&models)?;
     let cache = data.join("downloads");
     fs::create_dir_all(&cache)?;
+    remove_stale_stages(&data);
+    let pending: Vec<&Asset> = inventory
+        .assets
+        .iter()
+        .filter(|asset| !intact(&models, asset))
+        .collect();
+    // Drop obsolete files; keep only what still-pending pinned assets can reuse.
+    clean_downloads(
+        &cache,
+        &pending
+            .iter()
+            .flat_map(|asset| cache_names(asset))
+            .collect(),
+    );
+    report.total = pending.iter().map(|asset| asset_bytes(asset)).sum();
+    for asset in &inventory.assets {
+        if !pending.iter().any(|item| item.id == asset.id) {
+            remove_cached(&cache, asset);
+        }
+    }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(1800))
@@ -285,120 +564,316 @@ pub fn install() -> Result<()> {
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent(concat!("opencode-converse/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    eprintln!("Installing pinned English speech models. Model/dependency licenses remain their owners' terms; see native/THIRD_PARTY.md and assets model notices.");
-    for asset in &inventory.assets {
+    report.note("Installing pinned English speech models. Model/dependency licenses remain their owners' terms; see native/THIRD_PARTY.md and assets model notices.");
+    for asset in pending {
         ensure!(
             asset.bytes <= MAX_EXTRACTED,
             "Asset {} exceeds the verification limit",
             asset.id
         );
-        let _lock = asset_lock(&data.join("model-locks"), asset)?;
-        let stage = tempfile::Builder::new()
-            .prefix(".model-stage-")
-            .tempdir_in(&data)?;
-        if asset.format == Format::Files {
+        report.start(&asset.id, asset_bytes(asset));
+        install_asset(&client, &data, &models, &cache, asset, report)
+            .with_context(|| format!("Installing {}", asset.id))?;
+        remove_cached(&cache, asset);
+        report.verified(&asset.id);
+    }
+    report.note("Model installation complete. Run opencode-converse doctor; device behavior is not verified by installation.");
+    Ok(())
+}
+
+fn install_asset(
+    client: &reqwest::blocking::Client,
+    data: &Path,
+    models: &Path,
+    cache: &Path,
+    asset: &Asset,
+    report: &mut Reporter,
+) -> Result<()> {
+    let _lock = asset_lock(&data.join("model-locks"), asset)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".model-stage-")
+        .tempdir_in(data)?;
+    if asset.format == Format::Files {
+        let target = models.join(asset.runtime_path());
+        let staged = stage.path().join("files");
+        fs::create_dir(&staged)?;
+        for (index, member) in asset.files.iter().enumerate() {
+            let pin = member_pin(asset, member);
+            let download = fetch(
+                client,
+                cache,
+                stage.path(),
+                &format!("download-{index}"),
+                &pin,
+                report,
+            )?;
+            // The verified private copy becomes the staged member without reopening a cache path.
+            fs::rename(&download, staged.join(&member.path))?;
+        }
+        if target.exists() {
+            ensure!(
+                same_tree(&staged, &target)?,
+                "Existing model directory differs; remove {} explicitly and retry",
+                target.display()
+            );
+        } else {
+            crate::paths::publish_noclobber(&staged, &target)?;
+        }
+        return Ok(());
+    }
+    let download = fetch(client, cache, stage.path(), "download", asset, report)?;
+    match asset.format {
+        Format::Files => unreachable!("installed above"),
+        Format::File => {
             let target = models.join(asset.runtime_path());
-            let staged = stage.path().join("files");
-            fs::create_dir(&staged)?;
-            for (index, member) in asset.files.iter().enumerate() {
-                let pin = member_pin(asset, member);
-                let download = fetch(
-                    &client,
-                    &cache,
-                    stage.path(),
-                    &format!("download-{index}"),
-                    &pin,
-                )?;
-                // The verified private copy becomes the staged member without reopening a cache path.
-                fs::rename(&download, staged.join(&member.path))?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
             }
             if target.exists() {
                 ensure!(
-                    same_tree(&staged, &target)?,
+                    verified(&target, asset),
+                    "Existing model {} differs; remove it explicitly and retry",
+                    target.display()
+                );
+            } else {
+                crate::paths::publish_noclobber(&download, &target)?;
+            }
+        }
+        Format::TarBz2 => {
+            let root_name = asset.install_root()?;
+            let extracted = stage.path().join("extracted");
+            fs::create_dir(&extracted)?;
+            extract(
+                bzip2::read::BzDecoder::new(File::open(&download)?),
+                &extracted,
+                root_name,
+            )?;
+            let root = extracted.join(root_name);
+            let model = inventory::archive_relative(asset.runtime_path(), root_name)?;
+            let tokens = inventory::archive_relative(
+                asset
+                    .tokens_path()
+                    .context("Archive asset is missing its tokens path")?,
+                root_name,
+            )?;
+            let data_dir = inventory::archive_relative(
+                asset
+                    .data_dir()
+                    .context("Archive asset is missing its data directory")?,
+                root_name,
+            )?;
+            ensure!(
+                root.join(model).is_file()
+                    && root.join(tokens).is_file()
+                    && root.join(data_dir).is_dir(),
+                "Archive is missing required runtime files"
+            );
+            let target = models.join(
+                Path::new(asset.runtime_path())
+                    .parent()
+                    .context("Archive runtime path has no parent")?,
+            );
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if target.exists() {
+                ensure!(
+                    same_tree(&root, &target)?,
                     "Existing model directory differs; remove {} explicitly and retry",
                     target.display()
                 );
             } else {
-                crate::paths::publish_noclobber(&staged, &target)?;
-            }
-            eprintln!("Verified and installed {}", asset.id);
-            continue;
-        }
-        let download = fetch(&client, &cache, stage.path(), "download", asset)?;
-        match asset.format {
-            Format::Files => unreachable!("installed above"),
-            Format::File => {
-                let target = models.join(asset.runtime_path());
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                if target.exists() {
-                    ensure!(
-                        verified(&target, asset),
-                        "Existing model {} differs; remove it explicitly and retry",
-                        target.display()
-                    );
-                } else {
-                    crate::paths::publish_noclobber(&download, &target)?;
-                }
-            }
-            Format::TarBz2 => {
-                let root_name = asset.install_root()?;
-                let extracted = stage.path().join("extracted");
-                fs::create_dir(&extracted)?;
-                extract(
-                    bzip2::read::BzDecoder::new(File::open(&download)?),
-                    &extracted,
-                    root_name,
-                )?;
-                let root = extracted.join(root_name);
-                let model = inventory::archive_relative(asset.runtime_path(), root_name)?;
-                let tokens = inventory::archive_relative(
-                    asset
-                        .tokens_path()
-                        .context("Archive asset is missing its tokens path")?,
-                    root_name,
-                )?;
-                let data_dir = inventory::archive_relative(
-                    asset
-                        .data_dir()
-                        .context("Archive asset is missing its data directory")?,
-                    root_name,
-                )?;
-                ensure!(
-                    root.join(model).is_file()
-                        && root.join(tokens).is_file()
-                        && root.join(data_dir).is_dir(),
-                    "Archive is missing required runtime files"
-                );
-                let target = models.join(
-                    Path::new(asset.runtime_path())
-                        .parent()
-                        .context("Archive runtime path has no parent")?,
-                );
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                if target.exists() {
-                    ensure!(
-                        same_tree(&root, &target)?,
-                        "Existing model directory differs; remove {} explicitly and retry",
-                        target.display()
-                    );
-                } else {
-                    crate::paths::publish_noclobber(&root, &target)?;
-                }
+                crate::paths::publish_noclobber(&root, &target)?;
             }
         }
-        eprintln!("Verified and installed {}", asset.id);
     }
-    eprintln!("Model installation complete. Run opencode-converse doctor; device behavior is not verified by installation.");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn lines(sink: &Sink) -> Vec<serde_json::Value> {
+        String::from_utf8(sink.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn json_progress_is_throttled_bounded_and_ends_at_total() {
+        let sink = Sink::default();
+        let mut report = Reporter::new(true, Box::new(sink.clone()), 1000);
+        report.start("a", 1000);
+        for _ in 0..1000 {
+            report.progress(1, false);
+        }
+        report.progress(50, false); // overrun is clamped
+        report.verified("a");
+        report.finish();
+        let events = lines(&sink);
+        assert_eq!(events[0]["type"], "start");
+        let progress: Vec<_> = events.iter().filter(|e| e["type"] == "progress").collect();
+        assert!(progress.len() < 20, "throttled, got {}", progress.len());
+        assert_eq!(progress.last().unwrap()["done"], 1000);
+        assert!(progress
+            .iter()
+            .all(|e| e["done"].as_u64().unwrap() <= 1000 && e["asset"] == "a"));
+        assert_eq!(events[events.len() - 2]["type"], "verified");
+        assert_eq!(events.last().unwrap()["type"], "done");
+    }
+
+    #[test]
+    fn json_errors_name_the_asset_and_bound_the_message() {
+        let sink = Sink::default();
+        let mut report = Reporter::new(true, Box::new(sink.clone()), 1);
+        report.start("tts", 1);
+        report.fail(&anyhow::anyhow!("x".repeat(10_000)));
+        let event = &lines(&sink)[1];
+        assert_eq!(event["type"], "error");
+        assert_eq!(event["asset"], "tts");
+        assert_eq!(event["message"].as_str().unwrap().len(), MAX_MESSAGE_CHARS);
+    }
+
+    #[test]
+    fn human_mode_emits_no_json() {
+        let sink = Sink::default();
+        let mut report = Reporter::new(false, Box::new(sink.clone()), 10);
+        report.start("a", 10);
+        report.progress(10, true);
+        report.finish();
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_is_presence_and_length_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = asset(b"data");
+        assert!(!present(dir.path(), &pin));
+        fs::write(dir.path().join("fixture.bin"), b"dat").unwrap();
+        assert!(!present(dir.path(), &pin));
+        fs::write(dir.path().join("fixture.bin"), b"xxxx").unwrap();
+        assert!(present(dir.path(), &pin) && !intact(dir.path(), &pin));
+        fs::write(dir.path().join("fixture.bin"), b"data").unwrap();
+        assert!(present(dir.path(), &pin) && intact(dir.path(), &pin));
+        assert_eq!(asset_bytes(&pin), 4);
+    }
+
+    #[test]
+    fn files_assets_need_every_member() {
+        let inv = Inventory::load().unwrap();
+        let multi = inv
+            .assets
+            .iter()
+            .find(|a| a.format == Format::Files)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(multi.runtime_path());
+        fs::create_dir_all(&root).unwrap();
+        assert!(!present(dir.path(), multi));
+        assert_eq!(cache_names(multi).len(), multi.files.len());
+        assert!(cache_names(multi)[0].starts_with(&format!("{}--", multi.id)));
+    }
+
+    #[test]
+    fn download_cleanup_removes_stale_files_only_inside_downloads() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("downloads");
+        fs::create_dir_all(cache.join("subdir")).unwrap();
+        fs::write(cache.join("keep.bin"), b"k").unwrap();
+        fs::write(cache.join("old-model.tar.bz2"), b"o").unwrap();
+        fs::write(cache.join("subdir").join("inner"), b"i").unwrap();
+        let outside = root.path().join("outside.txt");
+        fs::write(&outside, b"precious").unwrap();
+        fs::write(root.path().join("sibling.bin"), b"s").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, cache.join("link")).unwrap();
+        clean_downloads(&cache, &HashSet::from(["keep.bin".to_string()]));
+        assert!(cache.join("keep.bin").exists());
+        assert!(!cache.join("old-model.tar.bz2").exists());
+        assert!(cache.join("subdir").join("inner").exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"precious");
+        assert!(root.path().join("sibling.bin").exists());
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(cache.join("link")).is_ok());
+    }
+
+    #[test]
+    fn download_cleanup_is_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        for id in 0..(MAX_DOWNLOAD_ENTRIES + 50) {
+            fs::write(root.path().join(format!("f{id}")), b"").unwrap();
+        }
+        clean_downloads(root.path(), &HashSet::new());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 50);
+    }
+
+    #[test]
+    fn stale_stage_directories_are_removed_without_touching_anything_else() {
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir_all(data.path().join(".model-stage-abc/inner")).unwrap();
+        fs::create_dir_all(data.path().join("models")).unwrap();
+        fs::write(data.path().join(".model-stage-file"), b"x").unwrap();
+        remove_stale_stages(data.path());
+        assert!(!data.path().join(".model-stage-abc").exists());
+        assert!(data.path().join("models").exists());
+        assert!(data.path().join(".model-stage-file").exists());
+    }
+
+    #[test]
+    fn concurrent_installers_queue_on_the_engine_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = crate::paths::lock_at(dir.path()).unwrap();
+        let sink = Sink::default();
+        let mut report = Reporter::new(true, Box::new(sink.clone()), 0);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let waited = acquire_lock(
+            dir.path(),
+            &mut report,
+            Duration::from_secs(10),
+            Duration::from_millis(50),
+        );
+        assert!(waited.is_ok());
+        release.join().unwrap();
+        assert!(lines(&sink).iter().any(|e| e["type"] == "waiting"));
+        // A holder that never leaves times the waiter out with the lock error.
+        let timed_out = acquire_lock(
+            dir.path(),
+            &mut report,
+            Duration::from_millis(150),
+            Duration::from_millis(50),
+        );
+        assert!(format!("{:#}", timed_out.unwrap_err()).contains("audio engine lock"));
+    }
+
+    #[test]
+    fn installed_asset_cache_is_removed() {
+        let cache = tempfile::tempdir().unwrap();
+        let pin = asset(b"data");
+        fs::write(cache.path().join("fixture.bin"), b"data").unwrap();
+        fs::write(cache.path().join("other.bin"), b"x").unwrap();
+        remove_cached(cache.path(), &pin);
+        assert!(!cache.path().join("fixture.bin").exists());
+        assert!(cache.path().join("other.bin").exists());
+    }
+
     #[test]
     fn corrupt_cache_identifies_exact_entry_and_manual_recovery_without_removal() {
         let root = tempfile::tempdir().unwrap();
