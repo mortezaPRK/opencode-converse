@@ -14,6 +14,7 @@ import { Converse, WORKER_UPDATE_MARKER } from "../rpc.js";
 import { resolveRoster, type Participant, type RuntimeConfig } from "../config.js";
 import type { EngineMessage, HostMessage, LocalSettings, VoiceStatus } from "../protocol.js";
 import { ensureEngine } from "./engine.js";
+import { ensureModels } from "./models.js";
 import { startRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { waitForConverse } from "./readiness.js";
 
@@ -66,7 +67,7 @@ export interface Snapshot {
   participants: Participant[];
   /** Name of the agent the current status is about (thinking about / speaking), if any. */
   speaker: string | null;
-  /** Engine download progress while starting, e.g. "Downloading voice engine 12/45 MB". */
+  /** Engine and speech-model download progress while starting, e.g. "Downloading speech models 120/210 MB". */
   progress?: string;
 }
 export interface BridgeOptions {
@@ -98,6 +99,8 @@ interface Lane {
   readonly users: Map<string, Turn>;
   pendingPrompt: Turn | undefined;
   queueNextPrompt: boolean;
+  /** Last idle state relayed to the server for this lane's supervisor session. */
+  idleSent: boolean;
 }
 interface Turn {
   lane: Lane;
@@ -139,6 +142,8 @@ interface Assistant {
 }
 const MAX_TRACKED = 4096;
 const CLEANUP_TIMEOUT_MS = 15_000;
+/** Lets the engine register a just-sent announcement before its lane is reported idle again. */
+const IDLE_SETTLE_MS = 250;
 export const MAX_REPLY_BYTES = 262_144;
 export const MAX_ANNOUNCEMENT_BYTES = 8192;
 
@@ -289,6 +294,10 @@ export function createBridge(options: BridgeOptions) {
   let started = false;
   let active: Turn | undefined;
   let lastTurn = 0;
+  /** Rust's verdict: nothing running, speaking, queued, heard, muted or paused. */
+  let engineIdle = false;
+  let idleChain = Promise.resolve();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
   // Generation is local user activity, not a server timestamp (which may be skewed).
   let generation = 0;
   const createLane = (participant: Participant, index: number): Lane => ({
@@ -306,6 +315,7 @@ export function createBridge(options: BridgeOptions) {
     users: new Map(),
     pendingPrompt: undefined,
     queueNextPrompt: false,
+    idleSent: false,
   });
   /** The first participant's session is the conversation's primary one. */
   const primarySession = () => lanes[0]?.sessionID ?? null;
@@ -357,11 +367,46 @@ export function createBridge(options: BridgeOptions) {
   const send = (message: HostMessage) => {
     if (!closed) runtime?.send(message);
   };
+  /**
+   * Tell the server which supervisor sessions may receive worker updates. A lane is idle only
+   * when the engine is idle and no turn or execution of that lane is in flight. `force`
+   * repeats an idle report, so the server can deliver again after a delivery of its own made
+   * it busy without any observable change here.
+   */
+  const syncIdle = (only?: Lane, force = false) => {
+    if (closed) return;
+    for (const lane of only ? [only] : lanes) {
+      const supervisorID = lane.sessionID;
+      if (!supervisorID) continue;
+      const idle =
+        engineIdle &&
+        !active &&
+        !lane.pendingPrompt &&
+        !(lane.execution && !lane.execution.finished);
+      if (idle === lane.idleSent && !(force && idle)) continue;
+      lane.idleSent = idle;
+      idleChain = idleChain
+        .then(() => {
+          if (closed) return;
+          return rpc.idle({ supervisorID, idle }, { ...request, signal: requestOptions().signal });
+        })
+        .catch((error) => {
+          // A lost report only delays updates until the next idle edge.
+          if (!closed) options.onError(error instanceof Error ? error : new Error(String(error)));
+        });
+    }
+  };
+  const settleIdle = () => {
+    if (closed) return;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => syncIdle(undefined, true), IDLE_SETTLE_MS);
+  };
   const finish = (reason: Extract<HostMessage, { type: "turn_end" }>["reason"]) => {
     const current = active;
     if (!current) return;
     active = undefined;
     send({ type: "turn_end", turn: current.number, reason });
+    settleIdle();
     // The authority of a user turn ends with the turn; ordered with the next prompt's grant.
     if (!closed && current.lane.sessionID) {
       const supervisorID = current.lane.sessionID;
@@ -415,6 +460,7 @@ export function createBridge(options: BridgeOptions) {
           finish("interrupted");
         } finally {
           closed = true;
+          clearTimeout(idleTimer);
           for (const lane of lanes) endExecution(lane.execution);
           const stopped = new StoppedError("Converse stopped before the event stream connected");
           rejectStream(stopped);
@@ -584,6 +630,7 @@ export function createBridge(options: BridgeOptions) {
         lane.execution = newExecution(true);
         lane.delivery = undefined;
       }
+      syncIdle(lane);
       return;
     }
     if (event.type === "session.inbox.delivered") {
@@ -596,6 +643,7 @@ export function createBridge(options: BridgeOptions) {
       if (!user && !background) return;
       lane.execution ??= newExecution(false);
       if (lane.execution.finished) lane.execution = newExecution(false);
+      syncIdle(lane);
       if (user) {
         user.delivered = true;
         user.execution = lane.execution;
@@ -705,6 +753,7 @@ export function createBridge(options: BridgeOptions) {
       endExecution(lane.execution);
       retireAssistants(lane);
       lane.delivery = undefined;
+      settleIdle();
       if (!current?.delivered || current.execution !== lane.execution) return;
       if (event.type === "session.execution.succeeded") finish("completed");
       if (event.type === "session.execution.failed") finish("failed");
@@ -793,6 +842,7 @@ export function createBridge(options: BridgeOptions) {
       );
       lane.sessionID = result.sessionID;
       lanesBySession.set(result.sessionID, lane);
+      syncIdle(lane);
       if (closed)
         await rpc
           .stop(
@@ -931,6 +981,10 @@ export function createBridge(options: BridgeOptions) {
       speaker = roster.find((p) => p.id === message.speaker)?.name ?? null;
       changed();
     }
+    if (message.type === "idle") {
+      engineIdle = message.idle;
+      syncIdle(undefined, message.idle);
+    }
     if (message.type === "error" && !message.fatal) options.onError(new Error(message.message));
     if (message.type === "prompt") {
       if (!lanes.length || message.turn <= lastTurn) return;
@@ -1028,7 +1082,7 @@ export function createBridge(options: BridgeOptions) {
           (signal) => rpc.hello(undefined, { ...request, signal }),
           abort.signal,
         );
-        if (hello.protocol !== 3) throw new Error("Converse server protocol mismatch");
+        if (hello.protocol !== 4) throw new Error("Converse server protocol mismatch");
         if (closed) return;
         const result = await rpc.start(undefined, {
           ...request,
@@ -1069,15 +1123,18 @@ export function createBridge(options: BridgeOptions) {
         let executable: string | undefined;
         if (!options.runtime) {
           try {
+            const onProgress = (text: string) => {
+              if (closed || text === progress) return;
+              progress = text;
+              changed();
+            };
             executable = await ensureEngine({
               ...(options.packageRoot ? { packageRoot: options.packageRoot } : {}),
               signal: abort.signal,
-              onProgress: (text) => {
-                if (closed || text === progress) return;
-                progress = text;
-                changed();
-              },
+              onProgress,
             });
+            if (closed) return;
+            await ensureModels({ executable, signal: abort.signal, onProgress });
           } finally {
             progress = undefined;
           }
@@ -1101,6 +1158,7 @@ export function createBridge(options: BridgeOptions) {
           throw error;
         }
         runtimeReady = true;
+        syncIdle();
         if (paused) send({ type: "pause", on: true });
       } catch (error) {
         fail(error);
@@ -1109,7 +1167,7 @@ export function createBridge(options: BridgeOptions) {
       }
     },
     stop,
-    /** Point the supervisor at an existing session inside this conversation's location. */
+    /** Point the supervisor at an existing session in any known project or worktree on this server. */
     async attach(targetSessionID: string, participantID?: string) {
       // Phase 2: only the user may reassign a followed session between agents.
       const lane = participantID ? lanes.find((l) => l.participant.id === participantID) : lanes[0];

@@ -95,6 +95,8 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     ["loading", "listening", "hearing", "thinking", "speaking", "muted"].includes(v.state)
   )
     return v as EngineMessage;
+  if (v.type === "idle" && exact(v, ["type", "idle"]) && typeof v.idle === "boolean")
+    return v as EngineMessage;
   if (
     v.type === "prompt" &&
     exactOptional(v, ["type", "turn", "speaker", "addressed", "text"], ["from"]) &&
@@ -136,7 +138,7 @@ export function parseEngineMessage(value: unknown): EngineMessage {
     return v as EngineMessage;
   throw new Error(
     v.type === "hello"
-      ? "Converse protocol version mismatch (expected 3)"
+      ? "Converse protocol version mismatch (expected 4)"
       : "Invalid Converse frame",
   );
 }

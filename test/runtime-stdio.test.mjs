@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { buildFixture } from "./client-cargo-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 let executable;
-const init = { type: "init", protocol: 3, settings: {} };
+const init = { type: "init", protocol: 4, settings: {} };
 
 async function cleanupResources(resources, remove, timeoutMs = 5000) {
   const results = await Promise.allSettled(
@@ -138,6 +138,30 @@ test(
     assert.equal(
       proc.frames.some((f) => f.type === "error"),
       false,
+    );
+    proc.send({ type: "shutdown" });
+    assert.equal((await proc.closed).code, 0);
+  },
+);
+
+test(
+  "stdio reports idle only on changes: not while a turn is active or speech is playing",
+  { timeout: 15_000 },
+  async (t) => {
+    const proc = await runtime(t);
+    proc.send(init);
+    await proc.wait((frames) => frames.some((f) => f.type === "prompt"));
+    proc.send({ type: "reply_end", speaker: "a1", turn: 1, reply: "r", text: "A b c." });
+    proc.send({ type: "turn_end", turn: 1, reason: "completed" });
+    await proc.wait(
+      (frames) => frames.some((f) => f.state === "speaking") && frames.at(-1)?.type === "idle",
+      { idle: true },
+    );
+    const idles = proc.frames.filter((f) => f.type === "idle").map((f) => f.idle);
+    assert.deepEqual(idles, [true, false, true], "idle, busy for the whole turn and speech, idle");
+    assert.ok(
+      proc.frames.findIndex((f) => f.state === "speaking") < proc.frames.length - 1,
+      "the final idle follows the speech",
     );
     proc.send({ type: "shutdown" });
     assert.equal((await proc.closed).code, 0);
@@ -286,7 +310,8 @@ async function runtime(t, args = ["run", "--test-fixture"], dir) {
   const isolated =
     args.includes("--test-fixture") ||
     args.includes("--test-fixture-loading") ||
-    (args[0] === "doctor" && !args.includes("--test-only-inference"));
+    (args[0] === "doctor" && !args.includes("--test-only-inference")) ||
+    args[0] === "models";
   const command = isolated ? [...args, "--test-state-dir", dir] : args;
   const child = spawn(executable, command, {
     cwd: root,
@@ -315,9 +340,10 @@ async function runtime(t, args = ["run", "--test-fixture"], dir) {
     child.once("close", (code, signal) => resolve({ code, signal, frames, stderr, pending }));
   });
   resources(t).children.add({ child, closed });
-  async function wait(predicate) {
+  async function wait(predicate, { idle = false } = {}) {
     const deadline = Date.now() + 5000;
-    while (!predicate(frames)) {
+    const view = () => (idle ? frames : frames.filter((frame) => frame.type !== "idle"));
+    while (!predicate(view())) {
       assert.equal(child.exitCode, null, JSON.stringify(frames));
       assert.ok(Date.now() < deadline, `Timed out waiting for runtime: ${JSON.stringify(frames)}`);
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -498,7 +524,7 @@ test(
 
 for (const [name, input] of [
   ["unknown message", '{"type":"unknown"}\n'],
-  ["unknown fields", '{"type":"init","protocol":3,"settings":{"modelPath":"/untrusted"}}\n'],
+  ["unknown fields", '{"type":"init","protocol":4,"settings":{"modelPath":"/untrusted"}}\n'],
   ["unit-message unknown fields", '{"type":"shutdown","surprise":true}\n'],
   ["protocol mismatch", '{"type":"init","protocol":1,"settings":{}}\n'],
   ["malformed JSON", "{definitely not JSON}\n"],
@@ -726,5 +752,24 @@ test(
     const result = await off.closed;
     assert.equal(result.frames.filter((f) => f.type === "prompt").length, 1);
     assert.ok(!result.frames.some((f) => f.type === "chain_end"));
+  },
+);
+
+test(
+  "models status --json is offline, one line, and writes nothing",
+  { timeout: 10_000 },
+  async (t) => {
+    const dir = await localDir(t);
+    const proc = await runtime(t, ["models", "status", "--json"], dir);
+    const result = await proc.closed;
+    assert.equal(result.code, 0);
+    assert.equal(result.frames.length, 1);
+    const [status] = result.frames;
+    assert.equal(status.type, "status");
+    assert.equal(status.installed, false);
+    assert.equal(status.assets.length, 5);
+    assert.ok(status.missing_bytes > 100_000_000);
+    assert.ok(status.assets.every((a) => a.installed === false && a.bytes > 0));
+    assert.deepEqual(await readdir(dir), []);
   },
 );

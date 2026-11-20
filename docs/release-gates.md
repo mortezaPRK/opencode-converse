@@ -32,9 +32,10 @@ architectures are not implied by operating-system support.
   indicator. Speaker playback remains independent.
 - Late generation results and interrupted reply chunks cannot restart speech.
 - Worker/project data cannot make the model approve a permission request.
+- Permission requests are never announced; pending ones stay readable through `converse_session_status`. Questions (`form.created`) from followed sessions are announced once, bounded, and never answered by tools.
 - Engine and speech-model paths are fixed under the app state folder. No plugin
   option or environment variable can redirect them. This version's engine is downloaded
-  once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions; device
+  once into the state folder and verified against `assets/engines.json`, and models are reused across engine versions (and installed automatically after the engine on first start, with the download cache cleaned afterwards); device
   preferences stay in host storage.
 - Pause silences spoken output without cancelling the turn, discarding queued
   speech, or stopping the runtime; resume continues the held speech. Verify on a
@@ -91,6 +92,14 @@ architectures are not implied by operating-system support.
   too; that a worker announcement never starts a chain; and that `agentChat: "off"`
   makes no hand-offs. Check the 90-second cap with a slow model. Record the token
   cost of a typical four-turn chain before shipping `"on"` as the default.
+- **Idle delivery gate.** Start a long task in a followed session, then talk to the
+  agent (including a multi-step tool-using answer). Confirm a worker completion that
+  lands mid-answer does not change, cut or restart the agent's speech, and that the
+  agent reports it only after it finished speaking and you are quiet. Finish several
+  followed sessions while the agent speaks: one combined report afterwards. Speak
+  right as an update arrives: your turn is answered first and the update follows
+  after. While muted or paused no update is spoken; it is reported after unmuting or
+  resuming. Check with two agents and that nothing is delivered after stopping.
 - **Prompter lock gate.** With two agents: Ada follows a session; Grace trying
   `send_message`, `interrupt_session` or `attach_session` on it is refused with Ada's
   name; saying "Grace, take over that session" moves it (Grace can prompt, Ada can no
@@ -116,8 +125,9 @@ architectures are not implied by operating-system support.
 - Attach each target's engine to the version's GitHub release as
   `opencode-converse-<version>-<platform>-<arch>[.exe]` and pin its size and
   SHA-256 in `assets/engines.json` before packing. Verify a clean machine downloads,
-  verifies, and starts the engine without a compiler or Node build step, and that
-  `npm pack` ships no engine binary.
+  verifies, and starts the engine without a compiler or Node build step, installs the speech
+  models automatically on the first conversation start, leaves `<state>/downloads/`
+  empty afterwards, and that `npm pack` ships no engine binary.
 - Test the packed npm artifact and native bundle, not just a workspace checkout.
 - Signing identities (macOS signing/notarization, Windows code signing) are not set
   up; the published engines are unsigned. Publication runs through the manual

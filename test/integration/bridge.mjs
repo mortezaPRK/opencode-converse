@@ -109,7 +109,7 @@ function server(directory, changed) {
           assert.equal(input, undefined);
           checkLocation(options);
           calls.push({ method: "hello" });
-          return { protocol: 3 };
+          return { protocol: 4 };
         },
         start: async (input, options) => {
           checkLocation(options);
@@ -124,6 +124,10 @@ function server(directory, changed) {
           changed.emit("change");
         },
         turn: async () => {},
+        idle: async (input, options) => {
+          checkLocation(options);
+          assert.equal(typeof input.idle, "boolean");
+        },
       };
     },
     event: {

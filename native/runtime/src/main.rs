@@ -546,6 +546,26 @@ fn doctor() -> i32 {
     }
 }
 
+fn models_install(json: bool) -> i32 {
+    match models::install(json) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Model installation failed: {e:#}");
+            1
+        }
+    }
+}
+
+fn models_status(json: bool) -> i32 {
+    match models::status(json) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Model status failed: {e:#}");
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -599,19 +619,33 @@ fn main() {
                 }
             }
         }
-        ["models", "install"] => match models::install() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("Model installation failed: {e:#}");
+        ["models", "install"] => models_install(false),
+        ["models", "install", "--json"] => models_install(true),
+        ["models", "status", "--json"] => models_status(true),
+        ["models", "status"] => models_status(false),
+        ["models", cmd, rest @ ..]
+            if matches!(*cmd, "install" | "status")
+                && matches!(rest, [.., "--test-state-dir", _]) =>
+        {
+            if !fixture_allowed(cfg!(debug_assertions)) {
+                error("fixture_unavailable", "Test-only state isolation requires compiled debug assertions; local storage was not accessed.");
                 1
+            } else {
+                let json = rest.contains(&"--json");
+                paths::set_test_state_dir(PathBuf::from(*rest.last().unwrap()));
+                if *cmd == "install" {
+                    models_install(json)
+                } else {
+                    models_status(json)
+                }
             }
-        },
+        }
         ["--version"] => {
             eprintln!("opencode-converse {}", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => {
-            eprintln!("Usage: opencode-converse run | doctor | models install\nTest-only: run --test-fixture [--test-state-dir PATH] | run --test-fixture-loading [--test-state-dir PATH] | doctor [--test-state-dir PATH] | doctor --test-only-inference");
+            eprintln!("Usage: opencode-converse run | doctor | models install [--json] | models status [--json]\nTest-only: run --test-fixture [--test-state-dir PATH] | run --test-fixture-loading [--test-state-dir PATH] | doctor [--test-state-dir PATH] | doctor --test-only-inference");
             2
         }
     };
@@ -877,7 +911,7 @@ mod tests {
             }
             assert_eq!(f.backend.fixture.played, ["The rest is on screen."]);
             assert!(matches!(
-                f.out.last(),
+                f.out.iter().rfind(|e| !matches!(e, Engine::Idle { .. })),
                 Some(Engine::Status {
                     state: Status::Listening,
                     ..

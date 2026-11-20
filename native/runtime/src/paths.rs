@@ -220,7 +220,7 @@ pub fn lock() -> anyhow::Result<std::fs::File> {
     lock_at(&dir)
 }
 
-fn lock_at(dir: &Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn lock_at(dir: &Path) -> anyhow::Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
     let file = std::fs::OpenOptions::new()
         .read(true)

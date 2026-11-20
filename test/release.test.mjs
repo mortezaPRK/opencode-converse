@@ -98,6 +98,24 @@ test("set-version updates every pinned place and is idempotent", async () => {
   assert.throws(() => setVersion(root, "v1.2.3"));
 });
 
+test("set-version keeps a version's pinned engines and clears them for a new version", async () => {
+  const root = await copyProject();
+  const entry = { file: "x", bytes: 1, sha256: "0".repeat(64) };
+  await writeFile(
+    join(root, "assets/engines.json"),
+    JSON.stringify({ version: "1.0.0", engines: { "darwin-arm64": entry } }),
+  );
+  setVersion(root, "1.0.0");
+  assert.deepEqual(JSON.parse(await text(root, "assets/engines.json")).engines, {
+    "darwin-arm64": entry,
+  });
+  setVersion(root, "1.0.1-pr.3.1");
+  assert.deepEqual(JSON.parse(await text(root, "assets/engines.json")), {
+    version: "1.0.1-pr.3.1",
+    engines: {},
+  });
+});
+
 test("all pinned versions agree", async () => {
   const pkg = JSON.parse(await text(repo, "package.json"));
   const lock = JSON.parse(await text(repo, "package-lock.json"));

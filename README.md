@@ -31,9 +31,11 @@ required; see [configuration](docs/configuration.md)):
 ```
 
 On first start the plugin downloads this version's engine from its GitHub release
-and verifies it against the pinned size and SHA-256. Then install the speech
-models once, with the engine path shown in the error or listed under
-[Develop](#develop) (`<state>/bin/<version>/opencode-converse models install`).
+and verifies it against the pinned size and SHA-256, then downloads and verifies the
+pinned speech models (about 210 MB) the same way, with progress shown while the
+conversation is starting. Later starts use what is installed. If the automatic
+download fails (offline machine, blocked host), the error names the asset and the
+reason and prints the manual command; see [Develop](#develop).
 A prerelease built from a pull request can be installed as
 `@mortz.prk/opencode-converse@<version>`; see [CONTRIBUTING](CONTRIBUTING.md).
 
@@ -61,8 +63,16 @@ ALSA (`libasound2`). Windows needs the Microsoft Visual C++ x64 Redistributable.
   bounded by the engine: at most 4 agent turns, 90 seconds and 2 round trips per
   thing you say; speaking ends it. Only one agent prompts a followed session, and
   only you can reassign it ("Grace, take over the build session").
-- English speech is the initial scope. Permission requests are announced, but
-  approvals happen in OpenCode's normal interface.
+- English speech is the initial scope. Permission requests are never announced
+  (the supervisor can read pending ones on request), and approvals happen in
+  OpenCode's normal interface. Questions from followed sessions are announced; you
+  answer them on screen.
+- Worker updates never interrupt the assistant. While you are speaking, a turn is
+  running, or anything is being spoken, queued or muted/paused, updates from followed
+  sessions wait; when the conversation is idle they reach the agent together in one
+  message (latest state per session, questions kept, a short "N more" note beyond
+  the bound), and the agent reports them. If you speak first, your turn goes first
+  and the updates wait for the next quiet moment.
 - The microphone starts only on an explicit command. Stopping a conversation
   releases its local runtime. Echo cancellation (`echoCancellation`, on by default)
   lets you talk over the assistant on speakers, but it is verified only offline
@@ -94,14 +104,20 @@ Normal installs download this version's engine on first use from the matching
 GitHub release into the fixed app state folder. The download is checked against
 the size and SHA-256 pinned in `assets/engines.json` and shows progress while the
 conversation starts. There is no engine path or URL option and no environment
-override. If models are missing, the runtime error prints the exact installed
-engine path to run. Model installation and diagnostics are explicit local
-operations:
+override. Speech models are installed automatically after the engine on first
+start. The same steps remain available as local commands for troubleshooting or
+offline preparation:
 
 ```sh
+<state>/bin/<version>/opencode-converse models status
 <state>/bin/<version>/opencode-converse models install
 <state>/bin/<version>/opencode-converse doctor
 ```
+
+`models status --json` and `models install --json` print bounded JSON lines (the
+plugin uses them for progress). Installation removes each downloaded archive from
+`<state>/downloads/` once its model is verified and installed, and clears stale
+files left there by older versions.
 
 Model URLs, sizes, and SHA-256 digests are recorded in
 [`assets/models.json`](assets/models.json). The same file defines the VAD, turn,
@@ -180,9 +196,12 @@ interrupt it. Say "start a plan session about X" and it creates a new session wi
 that visible OpenCode agent (`converse_list_agents`); without one, the hidden
 `converse-worker` agent is used. An existing session's agent is never changed.
 To talk to an existing session, run `/converse-attach` while viewing it, or ask
-the supervisor to attach one from `converse_list_sessions`. Only sessions at the
-conversation's own location can be attached, never supervisor sessions or
-sessions another active conversation already follows. The voice agent never
+the supervisor to attach one from `converse_list_sessions`. Sessions in any known
+project or worktree on the same server can be attached (announcements name the
+project, since questions and permissions are answered in OpenCode there), never
+supervisor sessions, archived sessions, or sessions another active conversation,
+in any location, already follows. A followed session that moves to another
+location must be attached again. The voice agent never
 owns a session: attaching only reads it and records it in the plugin's own
 storage, sending nothing and changing no metadata, title, or agent. Followed
 sessions (attached or created) can be prompted, interrupted, and announced, and
@@ -191,7 +210,7 @@ stops following a session; this leaves the session and any running work
 untouched, and stopping the conversation detaches everything. Sessions that
 earlier versions marked with `converse:worker` metadata are not treated as
 followed. The supervisor reports updates for followed sessions while you are
-listening. Permission requests must be decided on screen. If a server connection drops, start a new
+listening. Questions are announced and, like permission requests (not announced), are answered on screen. If a server connection drops, start a new
 conversation explicitly; user prompts are not automatically replayed.
 Long replies are shortened for speech; the full response remains available in
 the supervisor session.

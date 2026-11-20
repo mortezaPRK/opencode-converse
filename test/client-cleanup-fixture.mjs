@@ -18,7 +18,7 @@ export function cleanupFixture() {
     },
     rpc() {
       return {
-        hello: async () => ({ protocol: 3 }),
+        hello: async () => ({ protocol: 4 }),
         start: async () => ({ sessionID: `session-${++session}` }),
         stop: async (input, options) => {
           calls.push({ input, location: options.location });
@@ -94,7 +94,7 @@ export function cleanupFixture() {
       });
       proc.kill = () => false;
       processes.push(proc);
-      queueMicrotask(() => proc.stdout.write('{"type":"hello","protocol":3}\n'));
+      queueMicrotask(() => proc.stdout.write('{"type":"hello","protocol":4}\n'));
       return startRuntime({
         ...options,
         spawn: () => proc,
