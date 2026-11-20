@@ -26,6 +26,10 @@ async function copyProject() {
     "assets/engines.json",
     "native/Cargo.toml",
     "native/Cargo.lock",
+    "native/runtime/Cargo.toml",
+    ...["ve-audio", "ve-asr", "ve-vad", "ve-turn", "ve-tts"].map(
+      (crate) => `native/crates/${crate}/Cargo.toml`,
+    ),
     "src/client/engine.ts",
   ]) {
     await mkdir(join(root, path, ".."), { recursive: true });
@@ -88,6 +92,7 @@ test("set-version updates every pinned place and is idempotent", async () => {
     ].filter((m) => m[1] === "opencode-converse" || m[1].startsWith("ve-"));
     assert.equal(mine.length, 6);
     assert.ok(mine.every((m) => m[2] === version));
+    assert.match(cargoLock, /name = "webrtc-audio-processing-sys"\nversion = "2\.1\.0"\n/);
   }
   assert.throws(() => setVersion(root, "1.2"));
   assert.throws(() => setVersion(root, "v1.2.3"));
